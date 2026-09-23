@@ -4,6 +4,7 @@ import "./register-routes.ts";
 
 export { useWalletState } from "@elizaos/ui/state";
 export { InventoryAppView } from "./components/InventoryAppView.tsx";
+export { CryptoTerminalView } from "./CryptoTerminalView.tsx";
 export { InventoryView } from "./InventoryView.tsx";
 export { ChainIcon } from "./inventory/ChainIcon.tsx";
 export {
