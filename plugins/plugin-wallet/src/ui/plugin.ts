@@ -20,11 +20,11 @@ export const walletAppPlugin: Plugin = {
         id: "wallet.terminal",
         viewKind: "system",
         label: "Crypto Terminal",
-        icon: "ChartCandlestick",
+        icon: "TrendingUp",
         path: "/crypto",
-        tabAffinity: "crypto",
+        tabAffinity: "inventory",
         group: "wallet",
-        order: 45,
+        order: 60,
         surface: {
           background: "opaque",
           capabilities: [],
@@ -55,7 +55,7 @@ export const walletAppPlugin: Plugin = {
       label: "Crypto Terminal",
       description:
         "Unified portfolio, market intelligence, and confirmation-gated crypto execution surface",
-      icon: "ChartCandlestick",
+      icon: "TrendingUp",
       path: "/crypto",
       responseContext: { primaryContext: "crypto" },
       modalities: ["gui"],
@@ -91,6 +91,9 @@ export const walletAppPlugin: Plugin = {
       responseContext: { primaryContext: "wallet" },
       modalities: ["gui"],
       bundlePath: "dist/views/bundle.js",
+      // First-party instrumented view (data-agent-id controls): grant the
+      // agent-surface capability so the view broker admits agent-driven
+      // fills/clicks (#13452 manifest gate).
       surface: {
         background: "opaque",
         capabilities: ["agent-surface"],
