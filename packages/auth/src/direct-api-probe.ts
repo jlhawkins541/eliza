@@ -17,6 +17,11 @@ export function directProviderBaseUrl(
       );
     case "openai-api":
       return process.env.OPENAI_BASE_URL?.trim() || "https://api.openai.com/v1";
+    case "gemini-api":
+      return (
+        process.env.GOOGLE_GENERATIVE_AI_BASE_URL?.trim() ||
+        "https://generativelanguage.googleapis.com/v1beta"
+      );
     case "deepseek-api":
       return (
         process.env.DEEPSEEK_BASE_URL?.trim() || "https://api.deepseek.com"
@@ -249,7 +254,13 @@ export async function probeDirectApiKey(
               "x-api-key": apiKey,
             },
           })
-        : await fetch(
+        : providerId === "gemini-api"
+          ? await fetch(`${baseUrl}/models?pageSize=1`, {
+              method: "GET",
+              signal: controller.signal,
+              headers: { "x-goog-api-key": apiKey },
+            })
+          : await fetch(
             `${baseUrl}/${providerId === "openrouter-api" ? "key" : "models"}`,
             {
               method: "GET",

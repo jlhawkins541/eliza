@@ -80,6 +80,13 @@ export const ACCOUNT_PROVIDER_OPTIONS: AccountProviderOption[] = [
     eligibility: ["chat", "API key"],
   },
   {
+    id: "gemini-api",
+    name: "Gemini API",
+    category: "chat",
+    description: "Bring your own Google AI Studio API key for Gemini models.",
+    eligibility: ["chat", "API key"],
+  },
+  {
     id: "cerebras-api",
     name: "Cerebras API",
     category: "chat",

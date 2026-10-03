@@ -37,6 +37,7 @@ describe("consolidated account provider picker", () => {
 
     expect(chat).toContain("anthropic-api");
     expect(chat).toContain("openai-api");
+    expect(chat).toContain("gemini-api");
     expect(chat).toContain("openrouter-api");
     expect(chat).toContain("xai-api");
     expect(coding).toContain("anthropic-subscription");

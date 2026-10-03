@@ -77,9 +77,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         init?.method && init.method !== "GET" ? 10 * 60_000 : undefined,
     },
   );
-  const payload = (await response.json()) as {
-    error?: { message?: string } | string;
-  } | null;
+  let payload: { error?: { message?: string } | string } | null;
+  try {
+    payload = (await response.json()) as {
+      error?: { message?: string } | string;
+    } | null;
+  } catch (cause) {
+    // error-policy:J3 An upstream error page is not an API error payload; keep
+    // the HTTP status actionable instead of leaking a JSON parser exception.
+    if (!response.ok) {
+      throw new Error(`Request failed (${response.status})`, { cause });
+    }
+    throw cause;
+  }
   if (!response.ok) {
     const message =
       typeof payload?.error === "string"

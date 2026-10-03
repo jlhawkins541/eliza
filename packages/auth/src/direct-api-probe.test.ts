@@ -18,6 +18,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   delete process.env.OPENROUTER_BASE_URL;
   delete process.env.XAI_BASE_URL;
+  delete process.env.GOOGLE_GENERATIVE_AI_BASE_URL;
 });
 
 describe("direct provider authority", () => {
@@ -26,6 +27,23 @@ describe("direct provider authority", () => {
       "https://openrouter.ai/api/v1",
     );
     expect(directProviderBaseUrl("xai-api")).toBe("https://api.x.ai/v1");
+  });
+
+  it("probes Gemini with the API key header instead of placing the secret in the URL", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      probeDirectApiKey("gemini-api", "gemini-secret"),
+    ).resolves.toMatchObject({ ok: true, status: 200 });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1",
+      expect.objectContaining({
+        method: "GET",
+        headers: { "x-goog-api-key": "gemini-secret" },
+      }),
+    );
+    expect(fetchMock.mock.calls[0]?.[0]).not.toContain("gemini-secret");
   });
 
   it("returns the complete deduplicated model catalog without the credential", async () => {
