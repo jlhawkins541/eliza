@@ -144,7 +144,7 @@
   ],
   "plugins": [
     "@elizaos/plugin-sql",
-    "@elizaos/plugin-openai",
+    "@elizaos/plugin-zerollama",
     "@elizaos/plugin-wallet"
   ]
 }

@@ -63,6 +63,8 @@ EVM sign routes live in `src/chains/evm/routes/sign.ts`.
 ```
 plugins/plugin-wallet/
   auto-enable.ts               Auto-enable logic (env-read only, no service imports)
+  characters/                  Crypto Queen character; runs on local Ollama via
+                               @elizaos/plugin-zerollama (README.md has the run steps)
   src/
     index.ts                   Package barrel — re-exports everything
     plugin.ts                  walletPlugin object (services/providers/actions/init/dispose)
