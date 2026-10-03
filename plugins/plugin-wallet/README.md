@@ -22,7 +22,7 @@ All write operations default to `mode=prepare` (stages the transaction but does 
 
 | Subaction | What it does |
 |-----------|-------------|
-| `token_info` | Token and market data from DexScreener, Birdeye, or CoinGecko. |
+| `token_info` | Token and market data from DexScreener, Birdeye, or CoinGecko. A Birdeye lookup by token address (Solana mint, EVM, or Sui) also returns a security table: freeze authority, mutable metadata, top-10 holder share, Token-2022 transfer fee and non-transferable flags, and honeypot checks. A check Birdeye did not answer reads `unknown`, never a pass. |
 | `search_address` | Birdeye wallet portfolio lookup by address. |
 
 ### LP management
