@@ -7,8 +7,9 @@
  * Covers loading, live list, search, watchlist, chart, paper market and limit
  * orders, reservations, persistence, the unavailable-data state, confirmed
  * HUNT / SLEEP / OFF mode changes, price alerts fired by a later live price
- * and paused in OFF, and the GoPlus token safety check (served by the real
- * token safety route over a recorded payload).
+ * and paused in OFF, the PIN lock over real Web Crypto (set, lock, wrong PIN,
+ * unlock, idle auto-lock, forgot-PIN reset), and the GoPlus token safety
+ * check (served by the real token safety route over a recorded payload).
  */
 import { readFileSync } from "node:fs";
 import type http from "node:http";
@@ -117,11 +118,14 @@ vi.mock("./components/InventoryAppView.tsx", () => ({
 }));
 
 import { CryptoTerminalView } from "./CryptoTerminalView";
+import { createPinLock } from "./terminal/pin-lock";
 import {
   OPERATING_MODE_STORAGE_KEY,
   PAPER_LEDGER_STORAGE_KEY,
+  PIN_LOCK_STORAGE_KEY,
   PRICE_ALERTS_STORAGE_KEY,
   TERMINAL_MARKETS_POLL_MS,
+  WATCHLIST_STORAGE_KEY,
 } from "./terminal/terminal-data";
 
 const recorded = JSON.parse(
@@ -548,5 +552,161 @@ describe("CryptoTerminalView", () => {
     expect(
       (await screen.findByTestId("price-alerts-fired")).textContent,
     ).toContain("BTC rose above $60,000.00 (now $65,757.00)");
+  });
+
+  describe("PIN lock", () => {
+    const PIN = "2580";
+
+    const seedAlert = (targetUsd: number) =>
+      window.localStorage.setItem(
+        PRICE_ALERTS_STORAGE_KEY,
+        JSON.stringify({
+          version: 1,
+          alerts: [
+            {
+              id: "seeded",
+              assetId: "bitcoin",
+              symbol: "BTC",
+              direction: "above",
+              targetUsd,
+              createdAt: 1,
+              triggeredAt: null,
+              triggeredPriceUsd: null,
+            },
+          ],
+        }),
+      );
+
+    async function seedPin(autoLockMinutes: 5 | 15 | 30 = 15) {
+      const created = await createPinLock(PIN, autoLockMinutes, 1_000);
+      if (!created.ok) throw new Error(created.reason);
+      window.localStorage.setItem(
+        PIN_LOCK_STORAGE_KEY,
+        JSON.stringify(created.record),
+      );
+    }
+
+    async function enterPin(pin: string) {
+      fireEvent.change(screen.getByTestId("terminal-pin-input"), {
+        target: { value: pin },
+      });
+      fireEvent.click(screen.getByTestId("terminal-pin-unlock"));
+    }
+
+    it("sets a PIN, locks, refuses a wrong PIN, and unlocks with the right one", async () => {
+      render(<CryptoTerminalView />);
+      await screen.findByTestId("terminal-market-row-bitcoin");
+      fireEvent.click(screen.getByTestId("terminal-pin-settings"));
+      fireEvent.change(screen.getByTestId("terminal-pin-new"), {
+        target: { value: PIN },
+      });
+      fireEvent.change(screen.getByTestId("terminal-pin-confirm"), {
+        target: { value: "2581" },
+      });
+      fireEvent.click(screen.getByTestId("terminal-pin-save"));
+      expect(screen.getByRole("alert").textContent).toBe(
+        "The two new PINs don't match.",
+      );
+      fireEvent.change(screen.getByTestId("terminal-pin-confirm"), {
+        target: { value: PIN },
+      });
+      fireEvent.click(screen.getByTestId("terminal-pin-save"));
+      await screen.findByTestId("terminal-lock-now");
+      expect(screen.queryByRole("dialog")).toBeNull();
+      const stored = window.localStorage.getItem(PIN_LOCK_STORAGE_KEY) ?? "";
+      expect(JSON.parse(stored)).toMatchObject({ version: 1, failures: 0 });
+      expect(stored).not.toContain(PIN);
+
+      fireEvent.click(screen.getByRole("button", { name: "Wallet" }));
+      fireEvent.click(screen.getByTestId("terminal-lock-now"));
+      expect(screen.getByTestId("terminal-lock-screen")).toBeTruthy();
+      expect(screen.queryByText("Crypto Terminal")).toBeNull();
+      expect(screen.queryByTestId("wallet-rich-dashboard")).toBeNull();
+
+      await enterPin("1111");
+      expect((await screen.findByRole("alert")).textContent).toBe(
+        "Wrong PIN. 4 more tries before a short wait.",
+      );
+      expect(screen.getByTestId("terminal-lock-screen")).toBeTruthy();
+
+      await enterPin(PIN);
+      await screen.findByTestId("wallet-rich-dashboard");
+      expect(screen.queryByTestId("terminal-lock-screen")).toBeNull();
+    });
+
+    it("starts locked from a saved PIN, keeps checking alerts, and locks again when idle", async () => {
+      await seedPin(5);
+      seedAlert(60_000);
+      vi.useFakeTimers({
+        toFake: ["setInterval", "clearInterval", "Date"],
+        now: Date.now(),
+      });
+      render(<CryptoTerminalView />);
+      expect(screen.getByTestId("terminal-lock-screen")).toBeTruthy();
+      expect(
+        (await screen.findByTestId("terminal-lock-alerts")).textContent,
+      ).toBe("1 price alert fired while locked. Unlock to see it.");
+      expect(screen.queryByText(/BTC rose above/)).toBeNull();
+
+      await enterPin(PIN);
+      expect(
+        (await screen.findByTestId("price-alerts-fired")).textContent,
+      ).toContain("BTC rose above $60,000.00 (now $65,757.00)");
+
+      act(() => {
+        vi.advanceTimersByTime(4 * 60_000);
+      });
+      fireEvent.keyDown(window, { key: "Shift" });
+      act(() => {
+        vi.advanceTimersByTime(4 * 60_000);
+      });
+      expect(screen.queryByTestId("terminal-lock-screen")).toBeNull();
+      act(() => {
+        vi.advanceTimersByTime(60_000 + TERMINAL_MARKETS_POLL_MS);
+      });
+      expect(screen.getByTestId("terminal-lock-screen")).toBeTruthy();
+    });
+
+    it("resets every saved terminal record when the PIN is forgotten", async () => {
+      await seedPin();
+      seedAlert(70_000);
+      window.localStorage.setItem(WATCHLIST_STORAGE_KEY, '["tether"]');
+      window.localStorage.setItem(
+        OPERATING_MODE_STORAGE_KEY,
+        JSON.stringify({ mode: "hunt", history: [] }),
+      );
+      render(<CryptoTerminalView />);
+      fireEvent.click(screen.getByTestId("terminal-pin-forgot"));
+      const dialog = screen.getByRole("dialog");
+      expect(dialog.textContent).toMatch(/real wallet and its keys are not/);
+      fireEvent.click(within(dialog).getByTestId("terminal-pin-reset-confirm"));
+
+      await screen.findByTestId("terminal-market-row-bitcoin");
+      expect(screen.queryByTestId("terminal-lock-screen")).toBeNull();
+      expect(screen.getByTestId("terminal-pin-settings").textContent).toBe(
+        "Set PIN",
+      );
+      expect(screen.getByTestId("terminal-mode-status").textContent).toBe(
+        "SLEEP",
+      );
+      for (const key of [
+        PIN_LOCK_STORAGE_KEY,
+        PRICE_ALERTS_STORAGE_KEY,
+        WATCHLIST_STORAGE_KEY,
+        OPERATING_MODE_STORAGE_KEY,
+      ]) {
+        expect(window.localStorage.getItem(key)).toBeNull();
+      }
+    });
+
+    it("stays locked when the saved PIN cannot be read", async () => {
+      window.localStorage.setItem(PIN_LOCK_STORAGE_KEY, "{broken");
+      render(<CryptoTerminalView />);
+      expect(screen.getByRole("alert").textContent).toMatch(
+        /not valid JSON, so the terminal can't check your PIN/,
+      );
+      expect(screen.queryByTestId("terminal-pin-input")).toBeNull();
+      expect(screen.queryByText("Crypto Terminal")).toBeNull();
+    });
   });
 });

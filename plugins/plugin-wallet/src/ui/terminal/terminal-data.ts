@@ -3,7 +3,8 @@
  * price history, and the per-browser paper ledger and watchlist.
  *
  * It also owns the persisted HUNT / SLEEP / OFF operating mode, price alerts,
- * and the on-demand Solana token safety lookup.
+ * the PIN lock with its idle auto-lock, and the on-demand Solana token safety
+ * lookup.
  *
  * Market reads go through the authenticated app client to the plugin's
  * read-only `/api/wallet/terminal/*` routes. Loading, error, and ready are
@@ -33,6 +34,14 @@ import {
   settleOpenPaperOrders,
 } from "./paper-ledger.ts";
 import {
+  type AutoLockMinutes,
+  checkPin,
+  createPinLock,
+  isValidPin,
+  type PinLockRecord,
+  parsePinLock,
+} from "./pin-lock.ts";
+import {
   addPriceAlert,
   checkPriceAlerts,
   type PriceAlert,
@@ -48,6 +57,18 @@ export const PAPER_LEDGER_STORAGE_KEY = "eliza:wallet:paper-terminal:v1";
 export const WATCHLIST_STORAGE_KEY = "eliza:wallet:terminal-watchlist:v1";
 export const OPERATING_MODE_STORAGE_KEY = "eliza:wallet:terminal-mode:v1";
 export const PRICE_ALERTS_STORAGE_KEY = "eliza:wallet:terminal-alerts:v1";
+export const PIN_LOCK_STORAGE_KEY = "eliza:wallet:terminal-pin:v1";
+/** Everything "Reset terminal" erases from this browser. */
+export const TERMINAL_STORAGE_KEYS = [
+  PAPER_LEDGER_STORAGE_KEY,
+  WATCHLIST_STORAGE_KEY,
+  OPERATING_MODE_STORAGE_KEY,
+  PRICE_ALERTS_STORAGE_KEY,
+  PIN_LOCK_STORAGE_KEY,
+] as const;
+/** How often the idle auto-lock compares the last activity to the limit. */
+export const PIN_IDLE_CHECK_MS = 10_000;
+const ACTIVITY_EVENTS = ["pointerdown", "keydown", "wheel", "touchstart"];
 const DEFAULT_WATCHLIST = ["bitcoin", "ethereum", "solana"];
 
 export type RemoteState<T> =
@@ -382,4 +403,220 @@ export function usePriceAlerts(
   }, []);
 
   return { alerts: state.alerts, fired, loadError, add, remove, dismiss };
+}
+
+export type PinLockOutcome =
+  | { status: "ok" }
+  | { status: "wrong"; attemptsLeft: number }
+  | { status: "cooling-down"; retryAt: number }
+  | { status: "invalid-pin" }
+  | { status: "unavailable" }
+  | { status: "error"; message: string };
+
+export interface PinLockHandle {
+  /** `none` means no PIN is set; otherwise the PIN guards the terminal. */
+  status: "none" | "locked" | "unlocked";
+  autoLockMinutes: AutoLockMinutes | null;
+  /** Set when the stored lock could not be read; only a reset opens the terminal. */
+  loadError: string | null;
+  /** Changes on every reset so the terminal remounts from empty storage. */
+  generation: number;
+  unlock: (pin: string) => Promise<PinLockOutcome>;
+  lock: () => void;
+  /** Set the first PIN. */
+  setPin: (
+    pin: string,
+    autoLockMinutes: AutoLockMinutes,
+  ) => Promise<PinLockOutcome>;
+  /** Change the auto-lock time and, when `newPin` is given, the PIN. */
+  changeLock: (
+    currentPin: string,
+    newPin: string | null,
+    autoLockMinutes: AutoLockMinutes,
+  ) => Promise<PinLockOutcome>;
+  removePin: (currentPin: string) => Promise<PinLockOutcome>;
+  /** Erase the PIN and every saved terminal record in this browser. */
+  resetTerminal: () => void;
+}
+
+async function guardCrypto<T>(
+  run: () => Promise<T>,
+): Promise<T | { status: "error"; message: string }> {
+  try {
+    return await run();
+  } catch (error) {
+    // error-policy:J4 a Web Crypto failure becomes a visible error state and
+    // never counts as a correct PIN.
+    return {
+      status: "error",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * The terminal's PIN lock. A saved PIN starts the terminal locked, and an
+ * unlocked terminal locks again after its auto-lock time without pointer or
+ * key activity. An unreadable saved lock fails closed: the terminal stays
+ * locked and only a reset opens it.
+ */
+export function usePinLock(): PinLockHandle {
+  const initial = useMemo(
+    () => parsePinLock(readStorage(PIN_LOCK_STORAGE_KEY)),
+    [],
+  );
+  const [record, setRecord] = useState<PinLockRecord | null>(initial.record);
+  const [loadError, setLoadError] = useState<string | null>(
+    initial.status === "invalid" ? initial.error : null,
+  );
+  const [locked, setLocked] = useState(initial.status !== "empty");
+  const [generation, setGeneration] = useState(0);
+  const recordRef = useRef(record);
+  recordRef.current = record;
+  const lockedRef = useRef(locked);
+  lockedRef.current = locked;
+
+  const persist = useCallback((next: PinLockRecord | null) => {
+    recordRef.current = next;
+    setRecord(next);
+    if (next) {
+      shellLocalStorage.setItem(PIN_LOCK_STORAGE_KEY, JSON.stringify(next));
+    } else {
+      shellLocalStorage.removeItem(PIN_LOCK_STORAGE_KEY);
+    }
+  }, []);
+
+  const verify = useCallback(
+    async (pin: string): Promise<PinLockOutcome> => {
+      const current = recordRef.current;
+      if (!current) return { status: "unavailable" };
+      const checked = await guardCrypto(() =>
+        checkPin(current, pin, Date.now()),
+      );
+      if ("message" in checked) return checked;
+      if (checked.status === "unavailable") return checked;
+      persist(checked.record);
+      if (checked.status === "ok") return { status: "ok" };
+      if (checked.status === "wrong") {
+        return { status: "wrong", attemptsLeft: checked.attemptsLeft };
+      }
+      return { status: "cooling-down", retryAt: checked.retryAt };
+    },
+    [persist],
+  );
+
+  const store = useCallback(
+    async (
+      pin: string,
+      autoLockMinutes: AutoLockMinutes,
+    ): Promise<PinLockOutcome> => {
+      const created = await guardCrypto(() =>
+        createPinLock(pin, autoLockMinutes),
+      );
+      if ("message" in created) return created;
+      if (!created.ok) return { status: created.reason };
+      persist(created.record);
+      return { status: "ok" };
+    },
+    [persist],
+  );
+
+  const unlock = useCallback(
+    async (pin: string): Promise<PinLockOutcome> => {
+      const outcome = await verify(pin);
+      if (outcome.status === "ok") setLocked(false);
+      return outcome;
+    },
+    [verify],
+  );
+
+  const lock = useCallback(() => {
+    if (recordRef.current) setLocked(true);
+  }, []);
+
+  const setPin = useCallback(
+    async (
+      pin: string,
+      autoLockMinutes: AutoLockMinutes,
+    ): Promise<PinLockOutcome> => {
+      if (recordRef.current || lockedRef.current)
+        return { status: "unavailable" };
+      if (!isValidPin(pin)) return { status: "invalid-pin" };
+      return store(pin, autoLockMinutes);
+    },
+    [store],
+  );
+
+  const changeLock = useCallback(
+    async (
+      currentPin: string,
+      newPin: string | null,
+      autoLockMinutes: AutoLockMinutes,
+    ): Promise<PinLockOutcome> => {
+      if (lockedRef.current) return { status: "unavailable" };
+      if (newPin !== null && !isValidPin(newPin)) {
+        return { status: "invalid-pin" };
+      }
+      const verified = await verify(currentPin);
+      if (verified.status !== "ok") return verified;
+      if (newPin !== null) return store(newPin, autoLockMinutes);
+      const current = recordRef.current;
+      if (current) persist({ ...current, autoLockMinutes });
+      return { status: "ok" };
+    },
+    [persist, store, verify],
+  );
+
+  const removePin = useCallback(
+    async (currentPin: string): Promise<PinLockOutcome> => {
+      if (lockedRef.current) return { status: "unavailable" };
+      const verified = await verify(currentPin);
+      if (verified.status === "ok") persist(null);
+      return verified;
+    },
+    [persist, verify],
+  );
+
+  const resetTerminal = useCallback(() => {
+    for (const key of TERMINAL_STORAGE_KEYS) shellLocalStorage.removeItem(key);
+    recordRef.current = null;
+    setRecord(null);
+    setLoadError(null);
+    setLocked(false);
+    setGeneration((current) => current + 1);
+  }, []);
+
+  useEffect(() => {
+    if (locked || !record || typeof window === "undefined") return;
+    let lastActivity = Date.now();
+    const touch = () => {
+      lastActivity = Date.now();
+    };
+    for (const name of ACTIVITY_EVENTS) {
+      window.addEventListener(name, touch, { passive: true });
+    }
+    const limitMs = record.autoLockMinutes * 60_000;
+    const timer = setInterval(() => {
+      if (Date.now() - lastActivity >= limitMs) setLocked(true);
+    }, PIN_IDLE_CHECK_MS);
+    return () => {
+      clearInterval(timer);
+      for (const name of ACTIVITY_EVENTS) {
+        window.removeEventListener(name, touch);
+      }
+    };
+  }, [locked, record]);
+
+  return {
+    status: locked ? "locked" : record ? "unlocked" : "none",
+    autoLockMinutes: record?.autoLockMinutes ?? null,
+    loadError,
+    generation,
+    unlock,
+    lock,
+    setPin,
+    changeLock,
+    removePin,
+    resetTerminal,
+  };
 }

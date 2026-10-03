@@ -1,15 +1,16 @@
 /**
  * The crypto terminal: live market browsing, watchlist, per-asset price
  * history, a paper order ticket, a paper portfolio, price alerts, a Solana
- * token safety check, and the HUNT / SLEEP / OFF operating mode, alongside the
- * real wallet dashboard.
+ * token safety check, the HUNT / SLEEP / OFF operating mode, and an optional
+ * PIN lock, alongside the real wallet dashboard.
  *
  * Prices and history come from the plugin's read-only terminal routes and are
  * never fabricated: while they load or fail, the view says so and the order
  * ticket stays disabled. Every order here is a paper order applied to a local
  * practice ledger; the terminal never signs or submits a transaction, in any
  * mode. A mode changes only after the user confirms it, and OFF stops every
- * automatic market request. Real
+ * automatic market request. While locked, the session keeps polling and
+ * checking alerts but renders only the lock screen, wallet tab included. Real
  * balances stay in {@link InventoryAppView}, which owns the wallet pipeline.
  */
 import {
@@ -75,12 +76,15 @@ import {
   type PriceAlertDirection,
   type PriceAlertRejection,
 } from "./terminal/price-alerts.ts";
+import { PinControls, TerminalLockScreen } from "./terminal/TerminalLock.tsx";
 import {
   type PaperLedgerState,
+  type PinLockHandle,
   type PriceAlertsHandle,
   type TerminalMarketsState,
   useOperatingMode,
   usePaperLedger,
+  usePinLock,
   usePriceAlerts,
   useTerminalChart,
   useTerminalMarkets,
@@ -1358,6 +1362,11 @@ function PaperPortfolio({
 }
 
 export function CryptoTerminalView() {
+  const lock = usePinLock();
+  return <TerminalSession key={lock.generation} lock={lock} />;
+}
+
+function TerminalSession({ lock }: { lock: PinLockHandle }) {
   const [section, setSection] = useState<TerminalSection>("markets");
   const [assetId, setAssetId] = useState<string | null>(null);
   const mode = useOperatingMode();
@@ -1387,6 +1396,14 @@ export function CryptoTerminalView() {
     setAssetId(id);
     if (section === "wallet") setSection("markets");
   };
+
+  if (lock.status === "locked") {
+    return (
+      <Escape>
+        <TerminalLockScreen lock={lock} firedAlertCount={alerts.fired.length} />
+      </Escape>
+    );
+  }
 
   let body: React.ReactNode;
   if (section === "wallet") {
@@ -1476,9 +1493,12 @@ export function CryptoTerminalView() {
                 wallet.
               </p>
             </div>
-            <span className="rounded-full border border-border px-2.5 py-1 text-[0.68rem] font-medium uppercase tracking-[0.12em] text-muted">
-              Paper trading
-            </span>
+            <div className="flex items-center gap-2">
+              <PinControls lock={lock} />
+              <span className="rounded-full border border-border px-2.5 py-1 text-[0.68rem] font-medium uppercase tracking-[0.12em] text-muted">
+                Paper trading
+              </span>
+            </div>
           </div>
           <SegmentedControl
             role="tablist"
