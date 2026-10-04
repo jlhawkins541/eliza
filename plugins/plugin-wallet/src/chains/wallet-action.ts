@@ -1,15 +1,16 @@
 /**
  * Defines `walletRouterAction`, the single `WALLET` action that dispatches
  * every wallet subaction (`transfer`, `swap`, `bridge`, `gov`, `pump_fun_buy`,
- * `token_info`, `search_address`) and absorbs the legacy per-verb similes
+ * `token_info`, `search_address`, `token_safety`) and absorbs the legacy per-verb similes
  * (`SWAP`, `TRANSFER`, `CROSS_CHAIN_TRANSFER`, `WALLET_GOV`, `PUMP_FUN_BUY`,
  * `TOKEN_INFO`, `BIRDEYE_SEARCH`, …) so older prompts keep working. It parses
  * and validates raw params via `parseWalletRouterParams`, routes financial
  * subactions through the `wallet-context-safety` recipient/injection guards
  * and the `wallet-financial-confirmation` gate before touching
- * `WalletBackendService`, and dispatches the two read-only analytics
- * subactions (`token_info`, `search_address`) directly to their handlers
- * without the financial confirmation gate.
+ * `WalletBackendService`, and dispatches the three read-only analytics
+ * subactions (`token_info`, `search_address`, `token_safety`, a key-free
+ * on-chain Solana mint read) directly to their handlers without the financial
+ * confirmation gate.
  */
 import type {
   Action,
@@ -24,6 +25,7 @@ import type {
 } from "@elizaos/core";
 import { walletSearchAddressHandler } from "../analytics/birdeye/actions/wallet-search-address.js";
 import { tokenInfoHandler } from "../analytics/token-info/action.js";
+import { tokenSafetyHandler } from "../analytics/token-safety/action.js";
 import {
   assertEvmTransferRecipientAuthorized,
   assertSolanaTransferRecipientAuthorized,
@@ -75,6 +77,10 @@ const LEGACY_PUMP_FUN_ACTIONS = new Set([
   "BUY_PUMPFUN",
 ]);
 const LEGACY_TOKEN_INFO_ACTIONS = new Set(["TOKEN_INFO"]);
+const LEGACY_TOKEN_SAFETY_ACTIONS = new Set([
+  "TOKEN_SECURITY",
+  "CHECK_TOKEN_SAFETY",
+]);
 const LEGACY_SEARCH_ADDRESS_ACTIONS = new Set([
   "BIRDEYE_SEARCH",
   "BIRDEYE_LOOKUP",
@@ -82,7 +88,11 @@ const LEGACY_SEARCH_ADDRESS_ACTIONS = new Set([
 ]);
 const GOV_OPS = new Set(["propose", "vote", "queue", "execute"]);
 
-const ANALYTICS_SUBACTIONS = ["token_info", "search_address"] as const;
+const ANALYTICS_SUBACTIONS = [
+  "token_info",
+  "search_address",
+  "token_safety",
+] as const;
 type WalletAnalyticsSubaction = (typeof ANALYTICS_SUBACTIONS)[number];
 
 const WALLET_SUBACTIONS = [
@@ -154,6 +164,7 @@ function legacySubactionFromName(value: unknown): WalletSubaction | undefined {
   if (LEGACY_PUMP_FUN_ACTIONS.has(upper)) return "pump_fun_buy";
   if (LEGACY_TOKEN_INFO_ACTIONS.has(upper)) return "token_info";
   if (LEGACY_SEARCH_ADDRESS_ACTIONS.has(upper)) return "search_address";
+  if (LEGACY_TOKEN_SAFETY_ACTIONS.has(upper)) return "token_safety";
   return undefined;
 }
 
@@ -387,6 +398,34 @@ function serviceFromRuntime(
   return null;
 }
 
+type AnalyticsHandlerArgs = {
+  runtime: IAgentRuntime;
+  message: Memory;
+  state?: State;
+  options?: HandlerOptions | Record<string, unknown>;
+  raw: Record<string, unknown>;
+  callback?: HandlerCallback;
+};
+
+// Read-only analytics subactions dispatch here before runWalletRouter, so they
+// never reach WalletBackendService or the financial confirmation gate.
+const ANALYTICS_HANDLERS: Record<
+  WalletAnalyticsSubaction,
+  (args: AnalyticsHandlerArgs) => Promise<ActionResult>
+> = {
+  token_info: (a) =>
+    tokenInfoHandler(a.runtime, a.message, a.state, a.options, a.callback),
+  search_address: (a) =>
+    walletSearchAddressHandler(
+      a.runtime,
+      a.message,
+      a.state,
+      a.options,
+      a.callback,
+    ),
+  token_safety: (a) => tokenSafetyHandler(a.runtime, a.raw, a.callback),
+};
+
 async function parseRouterParams(
   message: Memory,
   state?: State,
@@ -543,9 +582,9 @@ async function runWalletRouter(
 export const walletRouterAction: Action = {
   name: "WALLET",
   description:
-    "Route wallet operations through registered chain handlers and analytics providers. Use action=transfer|swap|bridge|gov|pump_fun_buy for on-chain ops (params: chain, toChain, fromToken, toToken, amount, recipient, slippageBps, mode, dryRun); action=token_info for token/market data (params: target, query, address, chain); action=search_address for Birdeye wallet/portfolio lookup (param: address).",
+    "Route wallet operations through registered chain handlers and analytics providers. Use action=transfer|swap|bridge|gov|pump_fun_buy for on-chain ops (params: chain, toChain, fromToken, toToken, amount, recipient, slippageBps, mode, dryRun); action=token_info for token/market data (params: target, query, address, chain); action=search_address for Birdeye wallet/portfolio lookup (param: address); action=token_safety: read-only on-chain Solana mint check from SOLANA_RPC_URL (no key, no signing): token program, supply/decimals, mint and freeze authority, every Token-2022 extension (TransferHook, TransferFeeConfig, PermanentDelegate, NonTransferable, DefaultAccountState, MintCloseAuthority, PausableConfig decoded; others listed by name) and the largest token accounts' share of supply (accounts, not owners); a check that could not run reads UNKNOWN, never passed (param: address = the mint).",
   descriptionCompressed:
-    "WALLET transfer|swap|bridge|gov|pump_fun_buy|token_info|search_address; chain ops + market/portfolio",
+    "WALLET transfer|swap|bridge|gov|pump_fun_buy|token_info|search_address|token_safety; chain ops + market/portfolio + on-chain Solana mint safety",
   contexts: ["finance", "crypto", "wallet"],
   contextGate: { anyOf: ["finance", "crypto", "wallet"] },
   roleGate: { minRole: "ADMIN" },
@@ -582,6 +621,7 @@ export const walletRouterAction: Action = {
         "pump_fun_buy",
         "token_info",
         "search_address",
+        "token_safety",
       ],
     },
     {
@@ -720,7 +760,7 @@ export const walletRouterAction: Action = {
     {
       name: "address",
       description:
-        "Wallet address for search_address; token contract address for token_info token lookups.",
+        "Wallet address for search_address; token contract address for token_info token lookups; Solana mint address (base58) for token_safety.",
       required: false,
       schema: { type: "string" },
     },
@@ -751,17 +791,15 @@ export const walletRouterAction: Action = {
     const raw = extractRawParams(message, state, options) ?? {};
     const subaction = resolveSubaction(raw);
 
-    if (subaction === "token_info") {
-      return tokenInfoHandler(runtime, message, state, options, callback);
-    }
-    if (subaction === "search_address") {
-      return walletSearchAddressHandler(
+    if (isWalletAnalyticsSubaction(subaction)) {
+      return ANALYTICS_HANDLERS[subaction]({
         runtime,
         message,
         state,
         options,
+        raw,
         callback,
-      );
+      });
     }
 
     return runWalletRouter(runtime, message, state, options, callback);
@@ -822,6 +860,21 @@ export const walletRouterAction: Action = {
         content: {
           text: "Fetching the Birdeye portfolio.",
           action: "WALLET",
+        },
+      },
+    ],
+    [
+      {
+        name: "{{user1}}",
+        content: {
+          text: "Check on-chain whether mint 2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo has a freeze authority or a TransferHook",
+        },
+      },
+      {
+        name: "{{agent}}",
+        content: {
+          text: "Reading the mint from Solana RPC.",
+          actions: ["WALLET"],
         },
       },
     ],

@@ -30,7 +30,20 @@ export const evmPlugin: Plugin = {
   description: "EVM blockchain integration plugin",
   providers: [evmWalletProvider, tokenBalanceProvider],
   services: [EVMService] as ServiceClass[],
-  actions: promoteSubactionsToActions(walletRouterAction as Action) as Action[],
+  actions: promoteSubactionsToActions(walletRouterAction as Action, {
+    overrides: {
+      token_safety: {
+        description:
+          "subaction = token_safety: read-only on-chain Solana mint safety check from SOLANA_RPC_URL (param: address = mint); a check that could not run is UNKNOWN, never passed",
+        // plugin-x402-finance registers a parent action named
+        // CHECK_TOKEN_SAFETY. Core retrieval drops any simile equal to a
+        // registered parent name and exact parent names win, so this simile
+        // cannot take that action's calls; without it the legacy name is lost
+        // whenever x402-finance is not loaded.
+        similes: ["TOKEN_SECURITY", "CHECK_TOKEN_SAFETY"],
+      },
+    },
+  }) as Action[],
   routes: evmSignRoutes,
   async dispose(runtime: IAgentRuntime) {
     const svc = runtime.getService<EVMService>(EVMService.serviceType);
