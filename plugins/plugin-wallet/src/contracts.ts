@@ -3,9 +3,12 @@
  * consumers: export request/rejection shapes, the market-overview response
  * (price snapshots, movers, Polymarket predictions) served by
  * `wallet-market-overview-route.ts`, the read-only crypto terminal market
- * list and price history served by `wallet-terminal-market-route.ts`, and the
- * Solana token safety report served by `wallet-terminal-token-safety-route.ts`.
+ * list and price history served by `wallet-terminal-market-route.ts`, the
+ * Solana token safety report served by `wallet-terminal-token-safety-route.ts`,
+ * and the terminal's reviewed real trades served by `api/terminal-trade.ts`.
  */
+import type { TradePermissionMode } from "@elizaos/shared";
+
 export interface WalletExportRequestBody {
   confirm?: boolean;
   exportToken?: string;
@@ -155,3 +158,110 @@ export interface WalletTerminalTokenSafetyResponse {
   /** GoPlus marks a small set of well-known tokens as trusted. */
   trustedToken: boolean;
 }
+
+/** A terminal real trade spends SOL for a token (buy) or the reverse (sell). */
+export type WalletTerminalTradeSide = "buy" | "sell";
+
+/** Whether this wallet can sign Solana trades for the terminal. */
+export type WalletTerminalTradeWallet =
+  | { canSign: true; address: string }
+  | { canSign: false; address: string | null; reason: string };
+
+/** Response from GET /api/wallet/terminal/trade/status. */
+export interface WalletTerminalTradeStatusResponse {
+  tradePermissionMode: TradePermissionMode;
+  /** True when the permission mode lets a person trade with the local wallet. */
+  realTradingEnabled: boolean;
+  wallet: WalletTerminalTradeWallet;
+  /** Largest buy allowed in one trade, in SOL. */
+  maxBuySol: number;
+  slippageChoicesBps: number[];
+  /** How long a review can be confirmed, in seconds. */
+  reviewSeconds: number;
+}
+
+/** Body of POST /api/wallet/terminal/trade/review. */
+export interface WalletTerminalTradeReviewRequest {
+  side: WalletTerminalTradeSide;
+  mint: string;
+  /** SOL to spend for a buy, or token units to sell, as a decimal string. */
+  amount: string;
+  slippageBps: number;
+}
+
+/** One side of a reviewed swap, in display units and base units. */
+export interface WalletTerminalTradeAmount {
+  mint: string;
+  /** "SOL" for native SOL, otherwise null (the terminal shows the mint). */
+  symbol: "SOL" | null;
+  decimals: number;
+  amount: string;
+  rawAmount: string;
+}
+
+/** One leg of the route the reviewed transaction takes. */
+export interface WalletTerminalTradeRouteLeg {
+  label: string | null;
+  inputMint: string;
+  outputMint: string;
+  percent: number | null;
+}
+
+/** Simulation of the exact transaction under review. */
+export interface WalletTerminalTradeSimulation {
+  success: boolean;
+  err: string | null;
+  logs: string[];
+  unitsConsumed: number | null;
+}
+
+/** Response from POST /api/wallet/terminal/trade/review. */
+export interface WalletTerminalTradeReview {
+  reviewId: string;
+  /** ISO time after which the review can no longer be confirmed. */
+  expiresAt: string;
+  chain: "solana";
+  side: WalletTerminalTradeSide;
+  /** The wallet that signs and receives the output. */
+  walletAddress: string;
+  input: WalletTerminalTradeAmount;
+  /** Quoted output. */
+  output: WalletTerminalTradeAmount;
+  /** Least output the transaction accepts, in display units. */
+  minimumOutput: string;
+  slippageBps: number;
+  priceImpactPct: string | null;
+  route: WalletTerminalTradeRouteLeg[];
+  fee: {
+    baseFeeLamports: number;
+    /** Priority fee the swap set, when Jupiter reported it. */
+    priorityFeeLamports: number | null;
+    maxPriorityFeeLamports: number;
+  };
+  /** Private or Jito routing for this trade; not set up today. */
+  privateRouting: { available: false; detail: string };
+  simulation: WalletTerminalTradeSimulation;
+  /** False when the simulation failed; such a review cannot be confirmed. */
+  canConfirm: boolean;
+}
+
+/** Body of POST /api/wallet/terminal/trade/execute. */
+export interface WalletTerminalTradeExecuteRequest {
+  reviewId: string;
+  confirm: true;
+}
+
+/**
+ * Response from POST /api/wallet/terminal/trade/execute. `failed` means the
+ * transaction landed and reverted; `unconfirmed` means it was sent but its
+ * outcome was not seen before the blockhash expired or the RPC gave up.
+ */
+export type WalletTerminalTradeExecuteResponse =
+  | { status: "confirmed"; signature: string; explorerUrl: string }
+  | { status: "failed"; signature: string; explorerUrl: string; error: string }
+  | {
+      status: "unconfirmed";
+      signature: string;
+      explorerUrl: string;
+      detail: string;
+    };

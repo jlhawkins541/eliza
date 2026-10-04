@@ -3,8 +3,9 @@
  * price history, and the per-browser paper ledger and watchlist.
  *
  * It also owns the persisted HUNT / SLEEP / OFF operating mode, price alerts,
- * the PIN lock with its idle auto-lock, and the on-demand Solana token safety
- * lookup.
+ * the PIN lock with its idle auto-lock, the on-demand Solana token safety
+ * lookup, and the client side of real trades (readiness, review, execute),
+ * which the server gates and signs; nothing here holds or sees a key.
  *
  * Market reads go through the authenticated app client to the plugin's
  * read-only `/api/wallet/terminal/*` routes. Loading, error, and ready are
@@ -20,6 +21,10 @@ import type {
   WalletTerminalChartResponse,
   WalletTerminalMarketsResponse,
   WalletTerminalTokenSafetyResponse,
+  WalletTerminalTradeExecuteResponse,
+  WalletTerminalTradeReview,
+  WalletTerminalTradeReviewRequest,
+  WalletTerminalTradeStatusResponse,
 } from "../../contracts.ts";
 import {
   changeOperatingMode,
@@ -619,4 +624,113 @@ export function usePinLock(): PinLockHandle {
     removePin,
     resetTerminal,
   };
+}
+
+export type RealTradingState =
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ready"; data: WalletTerminalTradeStatusResponse };
+
+export type RealTradeOutcome<T> =
+  | { ok: true; value: T }
+  | { ok: false; message: string };
+
+export interface RealTradingHandle {
+  state: RealTradingState;
+  refresh: () => void;
+  /** Let a person trade with the local wallet (`manual-local-key`), then reload. */
+  enable: () => Promise<RealTradeOutcome<null>>;
+  review: (
+    request: WalletTerminalTradeReviewRequest,
+  ) => Promise<RealTradeOutcome<WalletTerminalTradeReview>>;
+  execute: (
+    reviewId: string,
+  ) => Promise<RealTradeOutcome<WalletTerminalTradeExecuteResponse>>;
+}
+
+async function attempt<T>(run: () => Promise<T>): Promise<RealTradeOutcome<T>> {
+  try {
+    return { ok: true, value: await run() };
+  } catch (error) {
+    // error-policy:J4 the trade panel shows the server's refusal as an error.
+    return { ok: false, message: describeError(error) };
+  }
+}
+
+/** Real-trade readiness plus review and execute calls for the Real trade tab. */
+export function useRealTrading(): RealTradingHandle {
+  const [state, setState] = useState<RealTradingState>({ status: "loading" });
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  const load = useCallback(async (): Promise<RealTradingState> => {
+    const next = await attempt(() =>
+      client.fetch<WalletTerminalTradeStatusResponse>(
+        "/api/wallet/terminal/trade/status",
+      ),
+    );
+    const loaded: RealTradingState = next.ok
+      ? { status: "ready", data: next.value }
+      : { status: "error", message: next.message };
+    if (mounted.current) setState(loaded);
+    return loaded;
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const refresh = useCallback(() => {
+    setState({ status: "loading" });
+    void load();
+  }, [load]);
+
+  const enable = useCallback(async (): Promise<RealTradeOutcome<null>> => {
+    const changed = await attempt(() =>
+      client.setTradePermissionMode("manual-local-key"),
+    );
+    if (!changed.ok) return changed;
+    const loaded = await load();
+    if (loaded.status === "error")
+      return { ok: false, message: loaded.message };
+    if (loaded.status === "ready" && !loaded.data.realTradingEnabled) {
+      return {
+        ok: false,
+        message: "The trade permission did not change. Try again.",
+      };
+    }
+    return { ok: true, value: null };
+  }, [load]);
+
+  const review = useCallback(
+    (request: WalletTerminalTradeReviewRequest) =>
+      attempt(() =>
+        client.fetch<WalletTerminalTradeReview>(
+          "/api/wallet/terminal/trade/review",
+          { method: "POST", body: JSON.stringify(request) },
+        ),
+      ),
+    [],
+  );
+
+  const execute = useCallback(
+    (reviewId: string) =>
+      attempt(() =>
+        client.fetch<WalletTerminalTradeExecuteResponse>(
+          "/api/wallet/terminal/trade/execute",
+          {
+            method: "POST",
+            body: JSON.stringify({ reviewId, confirm: true }),
+          },
+        ),
+      ),
+    [],
+  );
+
+  return { state, refresh, enable, review, execute };
 }

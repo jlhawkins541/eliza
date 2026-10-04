@@ -8,8 +8,11 @@
  * orders, reservations, persistence, the unavailable-data state, confirmed
  * HUNT / SLEEP / OFF mode changes, price alerts fired by a later live price
  * and paused in OFF, the PIN lock over real Web Crypto (set, lock, wrong PIN,
- * unlock, idle auto-lock, forgot-PIN reset), and the GoPlus token safety
- * check (served by the real token safety route over a recorded payload).
+ * unlock, idle auto-lock, forgot-PIN reset), the GoPlus token safety
+ * check (served by the real token safety route over a recorded payload), and
+ * the Real trade tab, served by the real wallet trade routes with Jupiter and
+ * Solana RPC doubles and a real signer over a generated key; the agent's
+ * trade-permission route is the one stand-in there.
  */
 import { readFileSync } from "node:fs";
 import type http from "node:http";
@@ -25,6 +28,11 @@ import {
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  createTerminalTradeHarness,
+  type TerminalTradeHarness,
+} from "../api/__tests__/terminal-trade-harness";
+import { __resetTerminalTradesForTests } from "../api/terminal-trade";
+import {
   __expireWalletTerminalCachesForTests,
   __resetWalletTerminalMarketRouteForTests,
   __setWalletTerminalFetchForTests,
@@ -37,8 +45,11 @@ import {
 } from "../routes/wallet-terminal-token-safety-route";
 
 const routeClient = vi.hoisted(() => ({
-  fetch: async (path: string): Promise<unknown> => {
+  fetch: async (path: string, _init?: RequestInit): Promise<unknown> => {
     throw new Error(`route client not installed for ${path}`);
+  },
+  setTradePermissionMode: async (mode: string): Promise<unknown> => {
+    throw new Error(`trade permission not installed for ${mode}`);
   },
 }));
 
@@ -159,8 +170,32 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+let trade: TerminalTradeHarness | null = null;
+
+// Real-trade calls go through the real wallet routes in the trade harness.
+async function viaTradeRoute(path: string, init?: RequestInit) {
+  if (!trade) throw new Error(`no trade harness for ${path}`);
+  const body =
+    typeof init?.body === "string"
+      ? (JSON.parse(init.body) as Record<string, unknown>)
+      : undefined;
+  routeCalls.push(path);
+  const res = await trade.request(
+    init?.method === "POST" ? "POST" : "GET",
+    path,
+    body,
+  );
+  if (res.status !== 200) {
+    throw new Error(String(res.body.error ?? `HTTP ${res.status}`));
+  }
+  return res.body;
+}
+
 // Serve the view's client calls through the real route handler.
-async function viaRoute(path: string): Promise<unknown> {
+async function viaRoute(path: string, init?: RequestInit): Promise<unknown> {
+  if (path.startsWith("/api/wallet/terminal/trade/")) {
+    return viaTradeRoute(path, init);
+  }
   const res = {
     statusCode: 0,
     body: "",
@@ -198,7 +233,16 @@ beforeEach(() => {
   upstreamDown = false;
   bitcoinPriceOverride = null;
   routeCalls = [];
+  trade = null;
+  __resetTerminalTradesForTests();
   routeClient.fetch = viaRoute;
+  // Stand-in for the agent's PUT /api/permissions/trade-mode.
+  routeClient.setTradePermissionMode = async (mode: string) => {
+    if (!trade) throw new Error("no trade harness");
+    trade.config.features.tradePermissionMode =
+      mode as TerminalTradeHarness["config"]["features"]["tradePermissionMode"];
+    return { ok: true, tradePermissionMode: mode };
+  };
   __setWalletTerminalTokenSafetyFetchForTests(async () =>
     jsonResponse(goplus.goplus),
   );
@@ -451,6 +495,170 @@ describe("CryptoTerminalView", () => {
     expect(routeCalls).toContain(
       `/api/wallet/terminal/token-safety?mint=${goplus.mint}`,
     );
+  });
+
+  describe("Real trade", () => {
+    // jsdom replaces the global Uint8Array, which breaks web3.js serialization
+    // of Node Buffers in the real routes; restore Node's for these tests.
+    const jsdomUint8Array = globalThis.Uint8Array;
+    beforeEach(() => {
+      globalThis.Uint8Array = Object.getPrototypeOf(Buffer.prototype)
+        .constructor as Uint8ArrayConstructor;
+    });
+    afterEach(() => {
+      globalThis.Uint8Array = jsdomUint8Array;
+    });
+
+    async function openRealTrade() {
+      fireEvent.click(screen.getByRole("button", { name: "Real trade" }));
+      return screen.findByTestId("real-trade-wallet");
+    }
+
+    async function reviewBuy(mint: string, amount = "0.25") {
+      fireEvent.change(screen.getByTestId("real-trade-mint"), {
+        target: { value: mint },
+      });
+      fireEvent.change(screen.getByTestId("real-trade-amount"), {
+        target: { value: amount },
+      });
+      fireEvent.click(screen.getByTestId("real-trade-review"));
+      return screen.findByTestId("real-trade-simulation");
+    }
+
+    it("turns real trading on only after a confirm, then sends a reviewed buy on tap", async () => {
+      trade = await createTerminalTradeHarness({ mode: "user-sign-only" });
+      render(<CryptoTerminalView />);
+      expect((await openRealTrade()).textContent).toContain(
+        "Trade permission: sign-only",
+      );
+      expect(screen.getByText("Real funds")).toBeTruthy();
+      expect(screen.getByTestId("real-trade-off")).toBeTruthy();
+      expect(screen.queryByTestId("real-trade-mint")).toBeNull();
+
+      fireEvent.click(screen.getByTestId("real-trade-enable"));
+      expect(trade.config.features.tradePermissionMode).toBe("user-sign-only");
+      fireEvent.click(screen.getByTestId("real-trade-enable-confirm"));
+      await screen.findByTestId("real-trade-mint");
+      expect(trade.config.features.tradePermissionMode).toBe(
+        "manual-local-key",
+      );
+
+      const simulation = await reviewBuy(trade.tokenMint);
+      expect(simulation.textContent).toBe("Passed · 61,250 compute units");
+      expect(screen.getByTestId("real-trade-pay").textContent).toBe("0.25 SOL");
+      expect(screen.getByTestId("real-trade-receive").textContent).toContain(
+        "2500 ",
+      );
+      expect(screen.getByTestId("real-trade-minimum").textContent).toContain(
+        "2475 ",
+      );
+      expect(screen.getByTestId("real-trade-fee").textContent).toBe(
+        "0.000005 SOL base + 0.00012 SOL priority",
+      );
+      expect(screen.getByRole("dialog").textContent).toContain(
+        "Private and Jito bundle routing are not set up.",
+      );
+      expect(screen.getByTestId("real-trade-expiry").textContent).toBe(
+        "Quote held for 60s.",
+      );
+      expect(trade.sent).toEqual([]);
+
+      fireEvent.click(screen.getByTestId("real-trade-confirm"));
+      const result = await screen.findByTestId("real-trade-result");
+      expect(result.textContent).toContain("Trade confirmed on Solana.");
+      expect(trade.sent).toHaveLength(1);
+      const link = result.querySelector("a");
+      expect(link?.getAttribute("href")).toMatch(
+        /^https:\/\/solscan\.io\/tx\/[1-9A-HJ-NP-Za-km-z]{64,88}$/,
+      );
+      expect(screen.queryByTestId("real-trade-confirm")).toBeNull();
+    });
+
+    it("shows a refused buy and never sends a failed simulation", async () => {
+      trade = await createTerminalTradeHarness();
+      render(<CryptoTerminalView />);
+      await openRealTrade();
+
+      fireEvent.change(screen.getByTestId("real-trade-mint"), {
+        target: { value: trade.tokenMint },
+      });
+      fireEvent.change(screen.getByTestId("real-trade-amount"), {
+        target: { value: "3" },
+      });
+      fireEvent.click(screen.getByTestId("real-trade-review"));
+      expect((await screen.findByRole("alert")).textContent).toMatch(
+        /over the 1 SOL per-trade limit/,
+      );
+      expect(screen.queryByRole("dialog")).toBeNull();
+
+      trade.simulationErr = { InstructionError: [2, { Custom: 1 }] };
+      const simulation = await reviewBuy(trade.tokenMint);
+      expect(simulation.textContent).toContain("Failed:");
+      expect(
+        (screen.getByTestId("real-trade-confirm") as HTMLButtonElement)
+          .disabled,
+      ).toBe(true);
+      expect(trade.sent).toEqual([]);
+    });
+
+    it("lets a quote expire and asks for a fresh review", async () => {
+      trade = await createTerminalTradeHarness();
+      render(<CryptoTerminalView />);
+      await openRealTrade();
+      vi.useFakeTimers({
+        toFake: ["setInterval", "clearInterval", "Date"],
+        now: Date.now(),
+      });
+      await reviewBuy(trade.tokenMint);
+      act(() => {
+        vi.advanceTimersByTime(61_000);
+      });
+      expect(screen.queryByTestId("real-trade-confirm")).toBeNull();
+      expect(screen.getByRole("dialog").textContent).toContain(
+        "This quote expired.",
+      );
+      fireEvent.click(screen.getByTestId("real-trade-review-again"));
+      expect((await screen.findByTestId("real-trade-expiry")).textContent).toBe(
+        "Quote held for 60s.",
+      );
+      expect(
+        trade.jupiterCalls.filter((url) => url.endsWith("/swap")),
+      ).toHaveLength(2);
+      expect(trade.sent).toEqual([]);
+    });
+
+    it("carries a checked mint from Token safety into the ticket and its review", async () => {
+      trade = await createTerminalTradeHarness({ tokenMint: goplus.mint });
+      render(<CryptoTerminalView />);
+      fireEvent.click(screen.getByRole("button", { name: "Token safety" }));
+      fireEvent.change(screen.getByTestId("token-safety-mint"), {
+        target: { value: goplus.mint },
+      });
+      fireEvent.click(screen.getByTestId("token-safety-check"));
+      fireEvent.click(await screen.findByTestId("token-safety-trade"));
+
+      const mint = (await screen.findByTestId(
+        "real-trade-mint",
+      )) as HTMLInputElement;
+      expect(mint.value).toBe(goplus.mint);
+      fireEvent.change(screen.getByTestId("real-trade-amount"), {
+        target: { value: "0.1" },
+      });
+      fireEvent.click(screen.getByTestId("real-trade-review"));
+      expect(
+        (await screen.findByText(/Caution: GoPlus reported risks/)).textContent,
+      ).toContain("Caution");
+    });
+
+    it("explains a wallet that can't sign instead of offering a ticket", async () => {
+      trade = await createTerminalTradeHarness({ solanaSigner: false });
+      render(<CryptoTerminalView />);
+      await openRealTrade();
+      expect(screen.getByRole("alert").textContent).toBe(
+        "This wallet can't place trades: This wallet can't sign Solana transactions here.",
+      );
+      expect(screen.queryByTestId("real-trade-mint")).toBeNull();
+    });
   });
 
   it("sets a price alert, refuses one already met, and fires on a later live price", async () => {

@@ -1,17 +1,19 @@
 /**
  * The crypto terminal: live market browsing, watchlist, per-asset price
  * history, a paper order ticket, a paper portfolio, price alerts, a Solana
- * token safety check, the HUNT / SLEEP / OFF operating mode, and an optional
- * PIN lock, alongside the real wallet dashboard.
+ * token safety check, a Real trade tab, the HUNT / SLEEP / OFF operating mode,
+ * and an optional PIN lock, alongside the real wallet dashboard.
  *
  * Prices and history come from the plugin's read-only terminal routes and are
  * never fabricated: while they load or fail, the view says so and the order
- * ticket stays disabled. Every order here is a paper order applied to a local
- * practice ledger; the terminal never signs or submits a transaction, in any
- * mode. A mode changes only after the user confirms it, and OFF stops every
- * automatic market request. While locked, the session keeps polling and
- * checking alerts but renders only the lock screen, wallet tab included. Real
- * balances stay in {@link InventoryAppView}, which owns the wallet pipeline.
+ * ticket stays disabled. Orders in the market tabs are paper orders applied to
+ * a local practice ledger. Real trades live only in {@link RealTradePanel},
+ * where each one is simulated by the server and sent only after the person
+ * confirms it; no mode or alert ever trades. A mode changes only after the
+ * user confirms it, and OFF stops every automatic market request. While
+ * locked, the session keeps polling and checking alerts but renders only the
+ * lock screen, wallet and trade tabs included. Real balances stay in
+ * {@link InventoryAppView}, which owns the wallet pipeline.
  */
 import {
   Button,
@@ -36,7 +38,7 @@ import {
   X,
 } from "lucide-react";
 import * as React from "react";
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type {
   WalletTerminalChartDays,
   WalletTerminalMarket,
@@ -76,6 +78,7 @@ import {
   type PriceAlertDirection,
   type PriceAlertRejection,
 } from "./terminal/price-alerts.ts";
+import { RealTradePanel } from "./terminal/RealTradePanel.tsx";
 import { PinControls, TerminalLockScreen } from "./terminal/TerminalLock.tsx";
 import {
   type PaperLedgerState,
@@ -99,6 +102,7 @@ type TerminalSection =
   | "watchlist"
   | "portfolio"
   | "safety"
+  | "trade"
   | "wallet";
 
 const SECTIONS: Array<{ value: TerminalSection; label: string }> = [
@@ -106,6 +110,7 @@ const SECTIONS: Array<{ value: TerminalSection; label: string }> = [
   { value: "watchlist", label: "Watchlist" },
   { value: "portfolio", label: "Paper portfolio" },
   { value: "safety", label: "Token safety" },
+  { value: "trade", label: "Real trade" },
   { value: "wallet", label: "Wallet" },
 ];
 
@@ -374,7 +379,7 @@ const SEVERITY_LABEL: Record<WalletTokenSafetySeverity, string> = {
 
 const SOLANA_MINT_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
-function TokenSafetyPanel() {
+function TokenSafetyPanel({ onTrade }: { onTrade: (mint: string) => void }) {
   const [mint, setMint] = useState("");
   const [touched, setTouched] = useState(false);
   const { state, check } = useTokenSafety();
@@ -486,6 +491,15 @@ function TokenSafetyPanel() {
               ? ` · ${state.data.holderCount.toLocaleString("en-US")} holders`
               : ""}
           </p>
+          <Button
+            variant="outline"
+            size="sm"
+            className="self-start"
+            onClick={() => onTrade(state.data.mint)}
+            data-testid="token-safety-trade"
+          >
+            Trade this token
+          </Button>
         </section>
       ) : (
         <p className="rounded-md border border-border/70 px-4 py-8 text-center text-sm text-muted">
@@ -1369,6 +1383,7 @@ export function CryptoTerminalView() {
 function TerminalSession({ lock }: { lock: PinLockHandle }) {
   const [section, setSection] = useState<TerminalSection>("markets");
   const [assetId, setAssetId] = useState<string | null>(null);
+  const [tradeMint, setTradeMint] = useState<string | null>(null);
   const mode = useOperatingMode();
   const { state: marketsState, refresh: refreshMarkets } = useTerminalMarkets(
     pollsMarkets(mode.mode),
@@ -1391,6 +1406,18 @@ function TerminalSession({ lock }: { lock: PinLockHandle }) {
   const alertsPaused = !alertsActive(mode.mode);
   const alerts = usePriceAlerts(prices, !alertsPaused);
   const selected = assetId ? marketsById.get(assetId) : undefined;
+  const tabsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    // On narrow screens the tab strip scrolls; keep the open section in view.
+    // jsdom has no scrollIntoView, so it is called only where it exists.
+    const index = SECTIONS.findIndex((item) => item.value === section);
+    const active =
+      tabsRef.current?.querySelectorAll<HTMLElement>('[role="tab"]')[index];
+    if (active && typeof active.scrollIntoView === "function") {
+      active.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+  }, [section]);
 
   const open = (id: string) => {
     setAssetId(id);
@@ -1409,7 +1436,16 @@ function TerminalSession({ lock }: { lock: PinLockHandle }) {
   if (section === "wallet") {
     body = <InventoryAppView />;
   } else if (section === "safety") {
-    body = <TokenSafetyPanel />;
+    body = (
+      <TokenSafetyPanel
+        onTrade={(mint) => {
+          setTradeMint(mint);
+          setSection("trade");
+        }}
+      />
+    );
+  } else if (section === "trade") {
+    body = <RealTradePanel key={tradeMint ?? ""} initialMint={tradeMint} />;
   } else if (marketsState.status === "idle" && section !== "portfolio") {
     body = (
       <p className="rounded-md border border-border/70 px-4 py-8 text-center text-sm text-muted">
@@ -1489,35 +1525,46 @@ function TerminalSession({ lock }: { lock: PinLockHandle }) {
                 Crypto Terminal
               </h1>
               <p className="text-xs text-muted">
-                Live markets with paper trading. Orders here never touch your
-                wallet.
+                Live markets with paper trading. Only the Real trade tab uses
+                your wallet, after you confirm each trade.
               </p>
             </div>
             <div className="flex items-center gap-2">
               <PinControls lock={lock} />
-              <span className="rounded-full border border-border px-2.5 py-1 text-[0.68rem] font-medium uppercase tracking-[0.12em] text-muted">
-                Paper trading
+              <span
+                className={cn(
+                  "rounded-full border px-2.5 py-1 text-[0.68rem] font-medium uppercase tracking-[0.12em]",
+                  section === "trade"
+                    ? "border-warn/60 text-warn"
+                    : "border-border text-muted",
+                )}
+              >
+                {section === "trade" ? "Real funds" : "Paper trading"}
               </span>
             </div>
           </div>
-          <SegmentedControl
-            role="tablist"
-            value={section}
-            onValueChange={(next) => {
-              setSection(next);
-              setAssetId(null);
-            }}
-            items={SECTIONS}
-            aria-label="Terminal sections"
-            className="max-w-full overflow-x-auto"
-          />
+          <div ref={tabsRef} className="min-w-0">
+            <SegmentedControl
+              role="tablist"
+              value={section}
+              onValueChange={(next) => {
+                setSection(next);
+                setAssetId(null);
+              }}
+              items={SECTIONS}
+              aria-label="Terminal sections"
+              className="max-w-full overflow-x-auto"
+            />
+          </div>
           <ModeControl
             mode={mode.mode}
             history={mode.history}
             loadError={mode.loadError}
             onChange={mode.change}
           />
-          {section !== "wallet" && section !== "safety" ? (
+          {section !== "wallet" &&
+          section !== "safety" &&
+          section !== "trade" ? (
             <MarketStatus
               state={marketsState}
               mode={mode.mode}

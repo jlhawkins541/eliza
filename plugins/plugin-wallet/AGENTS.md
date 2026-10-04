@@ -54,7 +54,7 @@ All on-chain subactions (`transfer`, `swap`, `bridge`, `gov`, `pump_fun_buy`) re
 
 **Routes (HTTP):**
 
-`handleWalletRoutes` in `src/api/wallet-routes.ts` is mounted by `@elizaos/agent`'s HTTP server. Endpoints cover wallet generate, import, balances, export, config, and chain/RPC settings. Solana-specific REST routes live in `src/chains/solana/routes/` and are registered directly on the plugin's `routes` array.
+`handleWalletRoutes` in `src/api/wallet-routes.ts` is mounted by `@elizaos/agent`'s HTTP server. Endpoints cover wallet generate, import, balances, export, config, chain/RPC settings, and the crypto terminal's authenticated real trades (`GET /api/wallet/terminal/trade/status`, `POST .../review`, `POST .../execute`, implemented in `src/api/terminal-trade.ts`). Solana-specific REST routes live in `src/chains/solana/routes/` and are registered directly on the plugin's `routes` array.
 
 EVM sign routes live in `src/chains/evm/routes/sign.ts`.
 
@@ -135,6 +135,9 @@ plugins/plugin-wallet/
       wallet-financial-confirmation.ts  requireConfirmation gate for on-chain writes
     api/
       wallet-routes.ts         handleWalletRoutes — mounted by @elizaos/agent HTTP server
+      terminal-trade.ts        Terminal real trades: review (build + simulate the Jupiter
+                               swap, hold its bytes 60s) and execute (sign those bytes)
+      __tests__/               Terminal trade route harness (Jupiter/RPC doubles, real signer)
     routes/
       plugin.ts                Additional plugin route exports
       wallet-terminal-market-route.ts  Public read-only CoinGecko market list and
@@ -156,9 +159,11 @@ plugins/plugin-wallet/
       InventoryView.tsx        GUI wallet view (Escape wrapper around InventoryAppView)
       CryptoTerminalView.tsx   /crypto terminal: live markets, watchlist, charts, paper
                                orders, paper portfolio, price alerts, token safety,
-                               HUNT/SLEEP/OFF mode, PIN lock, and the wallet dashboard tab
+                               Real trade tab, HUNT/SLEEP/OFF mode, PIN lock, and the
+                               wallet dashboard tab
       terminal/                Paper ledger, operating mode, price alerts, and PIN lock
-                               (pure), terminal data hooks, price chart, lock screen
+                               (pure), terminal data hooks, price chart, lock screen,
+                               RealTradePanel (review dialog and confirm tap)
       InventoryView.interact.ts  `interact` view capability handler
       wallet-view-bundle.ts    Entry for the standalone Vite view bundle (dist/views/bundle.js)
       components/              InventoryAppView DOM dashboard
@@ -216,6 +221,7 @@ All read via `runtime.getSetting()` (or `process.env` fallback where noted).
 | `HELIUS_API_KEY` | No | Helius API key for enhanced Solana RPC. |
 | `ELIZAOS_CLOUD_API_KEY` | No | Eliza Cloud API key for cloud-routing fallbacks. |
 | `ELIZA_WALLET_EXPORT_TOKEN` | No | Auth token required to export wallet keys via HTTP routes. |
+| `WALLET_TERMINAL_MAX_BUY_SOL` | No | Largest SOL amount one crypto terminal buy may spend. Defaults to `1`; a non-positive or non-numeric value is an error, not a fallback. |
 | `X402_SUPPORTED_NETWORKS` | No | Comma-separated network list for x402 SDK. |
 | `X402_GLOBAL_DAILY_LIMIT` | No | Daily USDC spend cap for x402. |
 | `X402_PER_REQUEST_MAX` | No | Per-request USDC cap for x402. |
@@ -243,7 +249,7 @@ Extend `src/analytics/birdeye/service.ts`. The service proxies all calls through
 
 ## Conventions / gotchas
 
-- **Financial confirmation gate.** All on-chain subactions (`transfer`, `swap`, `bridge`, `gov`, `pump_fun_buy`) go through `gateWalletFinancialExecution` in `src/security/wallet-financial-confirmation.ts`, which calls `requireConfirmation` from `@elizaos/core`. The LLM cannot bypass this by passing `mode=execute` alone — a confirmed reply turn is always required. Do not remove or short-circuit this gate.
+- **Financial confirmation gate.** All on-chain subactions (`transfer`, `swap`, `bridge`, `gov`, `pump_fun_buy`) go through `gateWalletFinancialExecution` in `src/security/wallet-financial-confirmation.ts`, which calls `requireConfirmation` from `@elizaos/core`. The LLM cannot bypass this by passing `mode=execute` alone — a confirmed reply turn is always required. Do not remove or short-circuit this gate. The crypto terminal's real trades are a separate, person-only path with their own gate (see the crypto terminal convention below); never route agent actions through it.
 - **`WalletBackend` is the only signing path.** Providers and actions must never read raw private key env vars directly. Go through `WalletBackendService.getWalletBackend()` → `WalletBackend`.
 - **pump.fun buy path.** `pump_fun_buy` is a Solana handler alias (`pumpfun`, `pump.fun`, `pump-fun`, `pump`) that requires `toToken`/`token` as a valid Solana mint and `amount` as SOL. It requests a serialized transaction from PumpPortal trade-local, signs through `WalletBackend.getSolanaSigner()` when available (falling back to the existing local `getWalletKey` Solana path), opens the token page through the optional browser service when available, then submits through `SOLANA_RPC_URL`. `mode=simulate` (GH #16613) shares the trade-local build (`fetchPumpFunTransaction`) but resolves only a public key (`resolvePumpFunPublicKey`, never `WalletBackend.getSolanaSigner()`/local keypair), skips the browser coin-page open, and runs `connection.simulateTransaction` instead of signing/sending.
 - **`handleWalletRoutes` is dependency-injected.** It imports nothing from `@elizaos/agent` to avoid a cycle. All agent-internal helpers (runtime lookup, auth, route helpers) are passed via `WalletRouteContext.deps` by `@elizaos/agent`'s server wiring.
@@ -252,7 +258,7 @@ Extend `src/analytics/birdeye/service.ts`. The service proxies all calls through
 - **Auto-enable.** `auto-enable.ts` must remain a lightweight env-read module with no transitive plugin imports. The auto-enable engine loads it on every agent boot.
 - **UI surface is subpath-only.** The package root (`.`) is the server barrel and must never import `src/ui/**`. Hosts import `@elizaos/plugin-wallet/ui` (components/barrel) or rely on the manifest-driven renderer boot (`elizaos.appRegister: "register"` → `src/register.ts`). `src/ui/register-routes.ts` must execute exactly once; duplicate imports create duplicate shell pages.
 - **`walletAppPlugin` naming.** The UI descriptor is named `@elizaos/plugin-wallet:ui` with `packageName: "@elizaos/plugin-wallet"` so the views registry resolves the package dir while the app-route loader id stays distinct from the runtime `wallet` plugin. `normalizeAppRoutePluginId` strips `:ui`, so `ELIZA_SKIP_APP_ROUTE_PLUGINS=wallet` skips it.
-- **Crypto terminal is paper-only.** `CryptoTerminalView` prices orders from the live `/api/wallet/terminal/*` routes but applies them only to the local `terminal/paper-ledger.ts` state persisted under `eliza:wallet:paper-terminal:v1`. It must never sign, call `WalletBackend`, or route through the `WALLET`/`TRADE` actions; real execution belongs behind the financial confirmation gate. Its HUNT / SLEEP / OFF mode (`terminal/operating-mode.ts`, default SLEEP, persisted under `eliza:wallet:terminal-mode:v1`) changes only after a confirm dialog and records each change; OFF must make no automatic market request, and HUNT's scout only ranks movers for review. Price alerts (`terminal/price-alerts.ts`, persisted under `eliza:wallet:terminal-alerts:v1`) are one-shot in-terminal notices checked against live prices in HUNT and SLEEP and paused in OFF. No mode or alert may place, sign, or submit an order. The optional PIN lock (`terminal/pin-lock.ts`, `terminal/TerminalLock.tsx`, persisted under `eliza:wallet:terminal-pin:v1`) stores only a salted PBKDF2-SHA-256 hash, starts the terminal locked, auto-locks after idle, and fails closed on an unreadable record; while locked the view renders only the lock screen (wallet tab included) but keeps polling and checking alerts. "Forgot PIN" erases every `TERMINAL_STORAGE_KEYS` record, never just the PIN. It is a privacy lock for the terminal, not a key vault: never store keys, seeds, or the PIN itself there.
+- **Crypto terminal: paper orders, plus real trades only behind review and a tap.** `CryptoTerminalView` prices market-tab orders from the live `/api/wallet/terminal/*` routes but applies them only to the local `terminal/paper-ledger.ts` state persisted under `eliza:wallet:paper-terminal:v1`; paper orders never sign, call `WalletBackend`, or route through the `WALLET`/`TRADE` actions. Real trades live only in the Real trade tab (`terminal/RealTradePanel.tsx`) and go through `src/api/terminal-trade.ts`: review builds the exact Jupiter swap with `fetchJupiterSwapTransaction`, refuses a build whose fee payer is not the signing wallet, simulates it, and holds its unsigned bytes for 60 seconds; execute signs those same bytes through `WalletBackend.getSolanaSigner()` and sends them once. Never re-quote between review and execute, never sign a failed simulation, an expired or used review, or a review from a different wallet, and keep each buy within `WALLET_TERMINAL_MAX_BUY_SOL`. Both steps need a trade permission that lets a person use the local wallet (`manual-local-key` or `agent-auto`) and refuse `x-eliza-agent-action` requests, so a terminal trade always rests on a person's tap; the tab may switch `user-sign-only` to `manual-local-key` only after its own confirm dialog, never to `agent-auto`. The review shows chain, mint, amounts, minimum output, slippage, destination, fee budget, route, simulation, private/Jito routing (not set up), and the GoPlus verdict for buys. Its HUNT / SLEEP / OFF mode (`terminal/operating-mode.ts`, default SLEEP, persisted under `eliza:wallet:terminal-mode:v1`) changes only after a confirm dialog and records each change; OFF must make no automatic market request, and HUNT's scout only ranks movers for review. Price alerts (`terminal/price-alerts.ts`, persisted under `eliza:wallet:terminal-alerts:v1`) are one-shot in-terminal notices checked against live prices in HUNT and SLEEP and paused in OFF. No mode or alert may place, sign, or submit an order. The optional PIN lock (`terminal/pin-lock.ts`, `terminal/TerminalLock.tsx`, persisted under `eliza:wallet:terminal-pin:v1`) stores only a salted PBKDF2-SHA-256 hash, starts the terminal locked, auto-locks after idle, and fails closed on an unreadable record; while locked the view renders only the lock screen (wallet and trade tabs included) but keeps polling and checking alerts. "Forgot PIN" erases every `TERMINAL_STORAGE_KEYS` record, never just the PIN. It is a privacy lock for the terminal, not a key vault: never store keys, seeds, or the PIN itself there.
 - **View bundle.** `dist/views/bundle.js` is built by `vite.config.views.ts` (entry `src/ui/wallet-view-bundle.ts`, export `InventoryView`), not by the Node build. Both must run for a complete dist.
 
 ## Verification

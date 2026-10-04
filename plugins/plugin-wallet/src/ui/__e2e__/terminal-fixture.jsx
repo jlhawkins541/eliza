@@ -11,8 +11,11 @@ import { MockAppProvider } from "../../../../../packages/ui/src/storybook/mock-p
 import { CryptoTerminalView } from "../CryptoTerminalView";
 import "./wallet-fixture.css";
 
-client.fetch = async (path) => {
-  const response = await window.fetch(path);
+client.fetch = async (path, init) => {
+  const response = await window.fetch(path, {
+    ...init,
+    headers: { "Content-Type": "application/json", ...init?.headers },
+  });
   const body = await response.json();
   if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
   return body;
