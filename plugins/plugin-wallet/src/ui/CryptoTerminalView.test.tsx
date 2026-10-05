@@ -9,7 +9,9 @@
  * HUNT / SLEEP / OFF mode changes, price alerts fired by a later live price
  * and paused in OFF, the PIN lock over real Web Crypto (set, lock, wrong PIN,
  * unlock, idle auto-lock, forgot-PIN reset), the GoPlus token safety
- * check (served by the real token safety route over a recorded payload), and
+ * check (served by the real token safety route over a recorded payload), the
+ * LunarCrush Social row (the real social route over a sample payload, with
+ * and without a key), and
  * the Real trade tab, served by the real wallet trade routes with Jupiter and
  * Solana RPC doubles and a real signer over a generated key; the agent's
  * trade-permission route is the one stand-in there.
@@ -38,6 +40,11 @@ import {
   __setWalletTerminalFetchForTests,
   handleWalletTerminalMarketRoute,
 } from "../routes/wallet-terminal-market-route";
+import {
+  __resetWalletTerminalSocialRouteForTests,
+  __setWalletTerminalSocialFetchForTests,
+  handleWalletTerminalSocialRoute,
+} from "../routes/wallet-terminal-social-route";
 import {
   __resetWalletTerminalTokenSafetyRouteForTests,
   __setWalletTerminalTokenSafetyFetchForTests,
@@ -159,7 +166,20 @@ const goplus = JSON.parse(
   ),
 ) as { mint: string; goplus: unknown };
 
+const lunarcrush = JSON.parse(
+  readFileSync(
+    resolve(
+      import.meta.dirname,
+      "../routes/__fixtures__/lunarcrush-coin.sample.json",
+    ),
+    "utf8",
+  ),
+) as { lunarcrush: { data: Record<string, unknown> } };
+
 let upstreamDown = false;
+/** LUNARCRUSH_API_KEY the social route sees; null leaves it unset. */
+let socialKey: string | null = null;
+let galaxyScore = 62;
 let bitcoinPriceOverride: number | null = null;
 let routeCalls: string[] = [];
 
@@ -216,10 +236,20 @@ async function viaRoute(path: string, init?: RequestInit): Promise<unknown> {
     req,
     res as unknown as http.ServerResponse,
   );
-  if (!handled) {
-    await handleWalletTerminalTokenSafetyRoute(
+  const served =
+    handled ||
+    (await handleWalletTerminalTokenSafetyRoute(
       req,
       res as unknown as http.ServerResponse,
+    ));
+  if (!served) {
+    await handleWalletTerminalSocialRoute(
+      req,
+      res as unknown as http.ServerResponse,
+      {
+        getSetting: (key: string) =>
+          key === "LUNARCRUSH_API_KEY" ? socialKey : null,
+      },
     );
   }
   const body = JSON.parse(res.body) as { error?: string };
@@ -231,6 +261,14 @@ async function viaRoute(path: string, init?: RequestInit): Promise<unknown> {
 
 beforeEach(() => {
   upstreamDown = false;
+  socialKey = null;
+  galaxyScore = 62;
+  __setWalletTerminalSocialFetchForTests(async () =>
+    jsonResponse({
+      ...lunarcrush.lunarcrush,
+      data: { ...lunarcrush.lunarcrush.data, galaxy_score: galaxyScore },
+    }),
+  );
   bitcoinPriceOverride = null;
   routeCalls = [];
   trade = null;
@@ -283,6 +321,7 @@ afterEach(() => {
   vi.useRealTimers();
   __resetWalletTerminalMarketRouteForTests();
   __resetWalletTerminalTokenSafetyRouteForTests();
+  __resetWalletTerminalSocialRouteForTests();
 });
 
 async function openBitcoin() {
@@ -495,6 +534,65 @@ describe("CryptoTerminalView", () => {
     expect(routeCalls).toContain(
       `/api/wallet/terminal/token-safety?mint=${goplus.mint}`,
     );
+    expect((await screen.findByText(/Add a LunarCrush key/)).textContent).toBe(
+      "Social: Add a LunarCrush key (LUNARCRUSH_API_KEY) to see social data.",
+    );
+    expect(routeCalls).toContain("/api/wallet/terminal/social?symbol=Bonk");
+  });
+
+  it("shows the LunarCrush Social row, and a low score raises no major flags to caution", async () => {
+    socialKey = "test-key";
+    const clean = goplus.goplus as {
+      result: Record<string, Record<string, unknown>>;
+    };
+    __setWalletTerminalTokenSafetyFetchForTests(async () =>
+      jsonResponse({
+        ...clean,
+        result: {
+          [goplus.mint]: {
+            ...clean.result[goplus.mint],
+            metadata_mutable: { status: "0" },
+            holders: [{ percent: "0.05" }],
+          },
+        },
+      }),
+    );
+    render(<CryptoTerminalView />);
+    fireEvent.click(screen.getByRole("button", { name: "Token safety" }));
+    fireEvent.change(screen.getByTestId("token-safety-mint"), {
+      target: { value: goplus.mint },
+    });
+    fireEvent.click(screen.getByTestId("token-safety-check"));
+    await screen.findByText(/Galaxy Score 62\/100/);
+    expect(screen.getByTestId("social-signal-text").textContent).toBe(
+      "Social: Galaxy Score 62/100 · AltRank #148 · 78% positive (LunarCrush matched Bonk, BONK)",
+    );
+    expect(screen.getByTestId("token-safety-verdict").textContent).toContain(
+      "No major flags",
+    );
+    expect(screen.queryByTestId("social-signal-caution")).toBeNull();
+
+    cleanup();
+    __resetWalletTerminalSocialRouteForTests();
+    galaxyScore = 12;
+    __setWalletTerminalSocialFetchForTests(async () =>
+      jsonResponse({
+        ...lunarcrush.lunarcrush,
+        data: { ...lunarcrush.lunarcrush.data, galaxy_score: galaxyScore },
+      }),
+    );
+    render(<CryptoTerminalView />);
+    fireEvent.click(screen.getByRole("button", { name: "Token safety" }));
+    fireEvent.change(screen.getByTestId("token-safety-mint"), {
+      target: { value: goplus.mint },
+    });
+    fireEvent.click(screen.getByTestId("token-safety-check"));
+    await screen.findByTestId("social-signal-caution");
+    const verdict = screen.getByTestId("token-safety-verdict").textContent;
+    expect(verdict).toContain("Caution · Bonk");
+    expect(verdict).toContain(
+      "GoPlus found no major flags, but LunarCrush shows weak social activity.",
+    );
   });
 
   describe("Real trade", () => {
@@ -670,10 +768,15 @@ describe("CryptoTerminalView", () => {
       fireEvent.change(screen.getByTestId("real-trade-amount"), {
         target: { value: "0.1" },
       });
+      socialKey = "test-key";
       fireEvent.click(screen.getByTestId("real-trade-review"));
       expect(
         (await screen.findByText(/Caution: GoPlus reported risks/)).textContent,
       ).toContain("Caution");
+      const dialog = screen.getByRole("dialog");
+      expect(
+        (await within(dialog).findByText(/Galaxy Score 62\/100/)).textContent,
+      ).toContain("AltRank #148");
     });
 
     it("explains a wallet that can't sign instead of offering a ticket", async () => {

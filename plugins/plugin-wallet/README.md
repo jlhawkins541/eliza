@@ -25,6 +25,7 @@ All write operations default to `mode=prepare` (stages the transaction but does 
 | `token_info` | Token and market data from DexScreener, Birdeye, or CoinGecko. |
 | `search_address` | Birdeye wallet portfolio lookup by address. |
 | `token_safety` | GoPlus rug-risk check of a Solana mint with an avoid/caution/no-major-flags verdict (read-only). |
+| `social_signal` | LunarCrush Galaxy Score, AltRank and sentiment for a ticker (read-only, needs `LUNARCRUSH_API_KEY`). A low score adds caution and never clears a GoPlus flag. |
 
 ### LP management
 
@@ -69,6 +70,7 @@ Additional optional variables:
 | `BIRDEYE_API_KEY` | Direct Birdeye access (falls back to Eliza Cloud route) |
 | `BIRDEYE_WALLET_ADDR` | Enables portfolio provider for a specific address |
 | `BIRDEYE_NO_TRENDING` | Disable trending provider |
+| `LUNARCRUSH_API_KEY` | LunarCrush key for the terminal's Social row and `social_signal`; kept on the server |
 | `ELIZA_AGENT_WALLET_AUTO_ENABLE` | Set to `0` to disable auto-enable |
 | `PUMPFUN_TRADE_LOCAL_URL` | Override PumpPortal local transaction API; default `https://pumpportal.fun/api/trade-local` |
 | `JUPITER_API_BASE_URL` | Override the Jupiter Swap API base; default `https://lite-api.jup.ag/swap/v1` |

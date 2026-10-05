@@ -4,7 +4,7 @@
  *
  * It also owns the persisted HUNT / SLEEP / OFF operating mode, price alerts,
  * the PIN lock with its idle auto-lock, the on-demand Solana token safety
- * lookup, and the client side of real trades (readiness, review, execute),
+ * and LunarCrush social signal lookups, and the client side of real trades (readiness, review, execute),
  * which the server gates and signs; nothing here holds or sees a key.
  *
  * Market reads go through the authenticated app client to the plugin's
@@ -20,6 +20,7 @@ import type {
   WalletTerminalChartDays,
   WalletTerminalChartResponse,
   WalletTerminalMarketsResponse,
+  WalletTerminalSocialSignalResponse,
   WalletTerminalTokenSafetyResponse,
   WalletTerminalTradeExecuteResponse,
   WalletTerminalTradeReview,
@@ -335,6 +336,55 @@ export function useTokenSafety(): {
   }, []);
 
   return { state, check };
+}
+
+export type SocialSignalState =
+  | { status: "idle" }
+  | { status: "loading"; symbol: string }
+  | { status: "error"; symbol: string; message: string }
+  | { status: "ready"; data: WalletTerminalSocialSignalResponse };
+
+/** On-demand LunarCrush social signal for one ticker; the key stays server-side. */
+export function useSocialSignal(): {
+  state: SocialSignalState;
+  check: (symbol: string) => void;
+  clear: () => void;
+} {
+  const [state, setState] = useState<SocialSignalState>({ status: "idle" });
+  const latest = useRef<string | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  const check = useCallback((symbol: string) => {
+    latest.current = symbol;
+    setState({ status: "loading", symbol });
+    const query = new URLSearchParams({ symbol });
+    client
+      .fetch<WalletTerminalSocialSignalResponse>(
+        `/api/wallet/terminal/social?${query.toString()}`,
+      )
+      .then((data) => {
+        if (mounted.current && latest.current === symbol)
+          setState({ status: "ready", data });
+      })
+      .catch((error: unknown) => {
+        // error-policy:J4 the Social row renders a distinct unavailable state.
+        if (mounted.current && latest.current === symbol)
+          setState({ status: "error", symbol, message: describeError(error) });
+      });
+  }, []);
+
+  const clear = useCallback(() => {
+    latest.current = null;
+    setState({ status: "idle" });
+  }, []);
+
+  return { state, check, clear };
 }
 
 export interface PriceAlertsHandle {

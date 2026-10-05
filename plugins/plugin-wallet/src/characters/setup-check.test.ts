@@ -27,6 +27,8 @@ interface FakeServices {
   health: string;
   lamports: number;
   rpcCalls: string[];
+  lunarStatus: number;
+  lunarAuth: string[];
 }
 
 let server: Server;
@@ -39,12 +41,22 @@ beforeEach(async () => {
     health: "ok",
     lamports: 250_000_000,
     rpcCalls: [],
+    lunarStatus: 200,
+    lunarAuth: [],
   };
   server = createServer((req, res) => {
     res.setHeader("content-type", "application/json");
     if (req.method === "GET" && req.url === "/api/tags") {
       res.end(
         JSON.stringify({ models: services.models.map((name) => ({ name })) }),
+      );
+      return;
+    }
+    if (req.url === "/lunarcrush/public/coins/btc/v1") {
+      services.lunarAuth.push(String(req.headers.authorization));
+      res.statusCode = services.lunarStatus;
+      res.end(
+        JSON.stringify({ data: { id: 1, symbol: "BTC", galaxy_score: 71 } }),
       );
       return;
     }
@@ -76,7 +88,12 @@ afterEach(async () => {
 });
 
 const deps = {
-  fetch: (input: string, init?: RequestInit) => fetch(input, init),
+  // LunarCrush calls go to the local server's /lunarcrush path instead.
+  fetch: (input: string, init?: RequestInit) =>
+    fetch(
+      input.replace("https://lunarcrush.com/api4", `${baseUrl}/lunarcrush`),
+      init,
+    ),
   readFile: (filePath: string) => {
     try {
       return readFileSync(filePath, "utf8");
@@ -96,6 +113,7 @@ function fullEnv(wallet: Keypair): Record<string, string> {
     OLLAMA_EMBEDDING_MODEL: "nomic-embed-text",
     SOLANA_RPC_URL: `${baseUrl}/rpc`,
     SOLANA_PRIVATE_KEY: bs58.encode(wallet.secretKey),
+    LUNARCRUSH_API_KEY: "test-lunarcrush-key",
   };
 }
 
@@ -126,6 +144,10 @@ describe("checkCryptoQueenSetup", () => {
     expect(find(checks, "Jito tip").detail).toBe(
       "Trades sent through Jito tip 0.0001 SOL.",
     );
+    expect(find(checks, "LunarCrush social signal").detail).toBe(
+      "LunarCrush accepted the key (BTC Galaxy Score 71).",
+    );
+    expect(services.lunarAuth).toEqual(["Bearer test-lunarcrush-key"]);
     expect(find(checks, "Database").area).toBe("@elizaos/plugin-sql");
     for (const check of checks) {
       expect(check.detail).not.toContain(env.SOLANA_PRIVATE_KEY);
@@ -145,6 +167,8 @@ describe("checkCryptoQueenSetup", () => {
     );
     expect(find(checks, "Solana wallet key").status).toBe("warn");
     expect(services.rpcCalls).toEqual([]);
+    expect(find(checks, "LunarCrush social signal").status).toBe("warn");
+    expect(services.lunarAuth).toEqual([]);
   });
 
   it("names a model that is not pulled", async () => {
@@ -205,6 +229,20 @@ describe("checkCryptoQueenSetup", () => {
       status: "warn",
       detail: expect.stringContaining("OPENAI_API_KEY"),
     });
+  });
+});
+
+describe("checkCryptoQueenSetup LunarCrush key", () => {
+  it("fails a rejected key without printing it", async () => {
+    services.lunarStatus = 401;
+    const env = fullEnv(Keypair.generate());
+    const check = find(
+      await checkCryptoQueenSetup(env, deps),
+      "LunarCrush social signal",
+    );
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("The LunarCrush key was rejected");
+    expect(check.detail).not.toContain("test-lunarcrush-key");
   });
 });
 

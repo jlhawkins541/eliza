@@ -6,7 +6,8 @@
  * the review window. The review shows what the architecture notes require
  * before signing: chain, mint, amounts, minimum output, slippage, destination,
  * fee budget, route, simulation, how it is sent (the Solana RPC, or privately
- * through Jito with a tip), and the token safety verdict.
+ * through Jito with a tip), the token safety verdict, and the LunarCrush
+ * social signal for buys.
  *
  * Turning real trading on changes the agent's trade permission to
  * `manual-local-key`, which lets a person trade from the local wallet but never
@@ -36,10 +37,13 @@ import type {
   WalletTerminalTradeStatusResponse,
   WalletTokenSafetyVerdict,
 } from "../../contracts.ts";
+import { SocialSignalRow } from "./SocialSignalRow.tsx";
 import {
   type RealTradingHandle,
+  type SocialSignalState,
   type TokenSafetyState,
   useRealTrading,
+  useSocialSignal,
   useTokenSafety,
 } from "./terminal-data.ts";
 
@@ -194,6 +198,7 @@ function ResultView({
 function ReviewDialog({
   review,
   safety,
+  social,
   sending,
   result,
   error,
@@ -203,6 +208,7 @@ function ReviewDialog({
 }: {
   review: WalletTerminalTradeReview;
   safety: TokenSafetyState | null;
+  social: SocialSignalState;
   sending: boolean;
   result: WalletTerminalTradeExecuteResponse | null;
   error: string | null;
@@ -289,6 +295,18 @@ function ReviewDialog({
               </details>
             ) : null}
             {safety ? <SafetyLine state={safety} /> : null}
+            {safety ? (
+              <SocialSignalRow
+                state={social}
+                symbol={
+                  safety.status === "ready"
+                    ? safety.data.symbol
+                    : safety.status === "error"
+                      ? null
+                      : ""
+                }
+              />
+            ) : null}
             {!review.canConfirm ? (
               <p role="alert" className="text-xs text-danger">
                 The simulation failed, so this trade can't be sent. Adjust the
@@ -428,6 +446,13 @@ function TradeTicket({
   const [result, setResult] =
     useState<WalletTerminalTradeExecuteResponse | null>(null);
   const { state: safety, check } = useTokenSafety();
+  const social = useSocialSignal();
+  const safetySymbol = safety.status === "ready" ? safety.data.symbol : null;
+  const { check: checkSocial, clear: clearSocial } = social;
+  useEffect(() => {
+    if (safetySymbol !== null) checkSocial(safetySymbol);
+    else clearSocial();
+  }, [safetySymbol, checkSocial, clearSocial]);
   const [safetyMint, setSafetyMint] = useState<string | null>(null);
   const mintId = useId();
   const amountId = useId();
@@ -565,6 +590,7 @@ function TradeTicket({
         <ReviewDialog
           review={review}
           safety={safetyMint ? safety : null}
+          social={social.state}
           sending={sending}
           result={result}
           error={sendError}

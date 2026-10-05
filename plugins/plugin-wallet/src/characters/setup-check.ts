@@ -3,12 +3,17 @@
  * this machine: the character file, local Ollama inference through
  * `@elizaos/plugin-zerollama`, Solana access through `@elizaos/plugin-wallet`,
  * and storage through `@elizaos/plugin-sql`. It reads only the given
- * environment and makes read-only calls (Ollama's model list and Solana
- * `getHealth` / `getBalance`); it never prints a key. `check-setup.ts` is the
+ * environment and makes read-only calls (Ollama's model list, Solana
+ * `getHealth` / `getBalance`, and one LunarCrush lookup when a key is set); it
+ * never prints a key. `check-setup.ts` is the
  * command-line entry.
  */
 import { Keypair } from "@solana/web3.js";
 import bs58 from "bs58";
+import {
+  fetchLunarCrushSocialSignal,
+  LunarCrushError,
+} from "../analytics/lunarcrush/social-signal.js";
 
 export type SetupCheckStatus = "pass" | "warn" | "fail";
 
@@ -430,6 +435,58 @@ function checkStorage(env: SetupEnv): SetupCheck {
   };
 }
 
+/**
+ * The social signal is optional: no key is a warning. With a key, one BTC
+ * lookup shows whether LunarCrush accepts it.
+ */
+async function checkSocialSignal(
+  env: SetupEnv,
+  deps: SetupCheckDeps,
+): Promise<SetupCheck> {
+  const area = "@elizaos/plugin-wallet";
+  const name = "LunarCrush social signal";
+  const apiKey = setting(env, "LUNARCRUSH_API_KEY");
+  if (apiKey === null) {
+    return {
+      area,
+      name,
+      status: "warn",
+      detail:
+        'LUNARCRUSH_API_KEY is not set, so the Social row and social_signal show "Add a LunarCrush key". Optional.',
+    };
+  }
+  try {
+    const signal = await fetchLunarCrushSocialSignal(
+      "BTC",
+      apiKey,
+      (input, init) =>
+        deps.fetch(String(input), {
+          ...init,
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        }),
+    );
+    return {
+      area,
+      name,
+      status: "pass",
+      detail:
+        signal.status === "tracked"
+          ? `LunarCrush accepted the key (BTC Galaxy Score ${signal.galaxyScore ?? "not reported"}).`
+          : "LunarCrush accepted the key.",
+    };
+  } catch (error) {
+    // error-policy:J1 setup-check boundary: the failure becomes a check line.
+    const rejected =
+      error instanceof LunarCrushError && error.kind === "key-rejected";
+    return {
+      area,
+      name,
+      status: rejected ? "fail" : "warn",
+      detail: describeFailure(error),
+    };
+  }
+}
+
 /** Runs every check in a fixed order; network checks run one after another. */
 export async function checkCryptoQueenSetup(
   env: SetupEnv,
@@ -439,6 +496,7 @@ export async function checkCryptoQueenSetup(
     checkCharacter(env, deps),
     ...(await checkOllama(env, deps)),
     ...(await checkSolana(env, deps)),
+    await checkSocialSignal(env, deps),
     checkStorage(env),
   ];
 }

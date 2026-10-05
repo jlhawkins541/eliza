@@ -79,6 +79,7 @@ import {
   type PriceAlertRejection,
 } from "./terminal/price-alerts.ts";
 import { RealTradePanel } from "./terminal/RealTradePanel.tsx";
+import { SocialSignalRow } from "./terminal/SocialSignalRow.tsx";
 import { PinControls, TerminalLockScreen } from "./terminal/TerminalLock.tsx";
 import {
   type PaperLedgerState,
@@ -89,6 +90,7 @@ import {
   usePaperLedger,
   usePinLock,
   usePriceAlerts,
+  useSocialSignal,
   useTerminalChart,
   useTerminalMarkets,
   useTokenSafety,
@@ -363,6 +365,14 @@ const VERDICT_COPY: Record<
   },
 };
 
+/** GoPlus's verdict, raised to caution when the social signal adds one. */
+function shownVerdict(
+  verdict: WalletTokenSafetyVerdict,
+  socialCaution: boolean,
+): WalletTokenSafetyVerdict {
+  return socialCaution && verdict === "no-major-flags" ? "caution" : verdict;
+}
+
 const SEVERITY_TONE: Record<WalletTokenSafetySeverity, string> = {
   danger: "text-danger",
   warn: "text-warn",
@@ -383,6 +393,19 @@ function TokenSafetyPanel({ onTrade }: { onTrade: (mint: string) => void }) {
   const [mint, setMint] = useState("");
   const [touched, setTouched] = useState(false);
   const { state, check } = useTokenSafety();
+  const social = useSocialSignal();
+  const reportMint = state.status === "ready" ? state.data.mint : null;
+  const reportSymbol = state.status === "ready" ? state.data.symbol : null;
+  const { check: checkSocial, clear: clearSocial } = social;
+  useEffect(() => {
+    if (reportMint !== null && reportSymbol !== null) checkSocial(reportSymbol);
+    else clearSocial();
+  }, [reportMint, reportSymbol, checkSocial, clearSocial]);
+  // A low Galaxy Score can raise "no major flags" to caution, never lower a verdict.
+  const socialCaution =
+    social.state.status === "ready" &&
+    social.state.data.status === "tracked" &&
+    social.state.data.addsCaution;
   const inputId = useId();
   const trimmed = mint.trim();
   const valid = SOLANA_MINT_PATTERN.test(trimmed);
@@ -444,15 +467,23 @@ function TokenSafetyPanel({ onTrade }: { onTrade: (mint: string) => void }) {
           <div
             className={cn(
               "rounded-md border px-4 py-3",
-              VERDICT_COPY[state.data.verdict].tone,
+              VERDICT_COPY[shownVerdict(state.data.verdict, socialCaution)]
+                .tone,
             )}
+            data-testid="token-safety-verdict"
           >
             <h2 id="token-safety-title" className="text-base font-semibold">
-              {VERDICT_COPY[state.data.verdict].label}
+              {
+                VERDICT_COPY[shownVerdict(state.data.verdict, socialCaution)]
+                  .label
+              }
               {state.data.symbol ? ` · ${state.data.symbol}` : ""}
             </h2>
             <p className="text-xs text-txt">
-              {VERDICT_COPY[state.data.verdict].detail}
+              {shownVerdict(state.data.verdict, socialCaution) !==
+              state.data.verdict
+                ? "GoPlus found no major flags, but LunarCrush shows weak social activity."
+                : VERDICT_COPY[state.data.verdict].detail}
             </p>
           </div>
           <ul className="divide-y divide-border/70 rounded-md border border-border/70">
@@ -478,6 +509,7 @@ function TokenSafetyPanel({ onTrade }: { onTrade: (mint: string) => void }) {
               </li>
             ))}
           </ul>
+          <SocialSignalRow state={social.state} symbol={reportSymbol} />
           <p
             className={cn(
               "text-xs",

@@ -159,6 +159,59 @@ export interface WalletTerminalTokenSafetyResponse {
   trustedToken: boolean;
 }
 
+/** Provider behind a social signal, and whether this answer is fresh. */
+export interface WalletSocialSignalSource {
+  providerId: "lunarcrush";
+  providerName: "LunarCrush";
+  providerUrl: string;
+  /** True when a refresh failed and an earlier answer is served instead. */
+  stale: boolean;
+  error: string | null;
+}
+
+/** LunarCrush's numbers for one tracked coin; null means it didn't report one. */
+export interface WalletSocialSignalScores {
+  /** LunarCrush's id, name and symbol for the coin it matched. */
+  coin: { id: number | null; name: string | null; symbol: string | null };
+  /** 0 to 100 blend of social and market activity; higher is stronger. */
+  galaxyScore: number | null;
+  /** Rank against every coin LunarCrush tracks; 1 is the strongest. */
+  altRank: number | null;
+  /** Share of social posts that read as positive, 0 to 100. */
+  sentimentPct: number | null;
+  socialVolume24h: number | null;
+  interactions24h: number | null;
+  /**
+   * True when the Galaxy Score is reported and below the caution line. It can
+   * only add caution beside the GoPlus verdict; it never clears or replaces it.
+   */
+  addsCaution: boolean;
+}
+
+/**
+ * Response from GET /api/wallet/terminal/social and the WALLET
+ * `social_signal` result. A read-only social signal that never changes the
+ * GoPlus verdict: `no-key` means LUNARCRUSH_API_KEY is unset and nothing was
+ * requested; `not-tracked` means LunarCrush has no coin for the symbol, which
+ * is not a low score.
+ */
+export type WalletTerminalSocialSignalResponse =
+  | { status: "no-key"; symbol: string }
+  | {
+      status: "not-tracked";
+      symbol: string;
+      checkedAt: string;
+      stale: boolean;
+      source: WalletSocialSignalSource;
+    }
+  | ({
+      status: "tracked";
+      symbol: string;
+      checkedAt: string;
+      stale: boolean;
+      source: WalletSocialSignalSource;
+    } & WalletSocialSignalScores);
+
 /** A terminal real trade spends SOL for a token (buy) or the reverse (sell). */
 export type WalletTerminalTradeSide = "buy" | "sell";
 

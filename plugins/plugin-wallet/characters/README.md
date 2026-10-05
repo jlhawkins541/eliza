@@ -42,7 +42,8 @@ through `@elizaos/plugin-zerollama`, so no cloud API key is needed.
      for real trades, `SOLANA_PRIVATE_KEY` of a separate hot wallet that holds
      only trading funds. `WALLET_TERMINAL_MAX_BUY_SOL` caps each terminal buy;
      `WALLET_TERMINAL_JITO_TIP_LAMPORTS` sets the tip for trades you send
-     privately through Jito.
+     privately through Jito. `LUNARCRUSH_API_KEY` (optional) turns on the
+     LunarCrush social signal.
    - **`@elizaos/plugin-sql`**: nothing to set; it stores data in embedded
      PGlite unless you give it `POSTGRES_URL`.
 

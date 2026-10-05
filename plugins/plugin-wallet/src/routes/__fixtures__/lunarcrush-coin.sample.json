@@ -1,0 +1,19 @@
+{
+  "_note": "Shaped from LunarCrush's public API v4 /public/coins/:coin/v1 documentation; not a recorded call (the build sandbox cannot reach lunarcrush.com). Replace with a recorded response from a machine with a LUNARCRUSH_API_KEY.",
+  "symbol": "BONK",
+  "lunarcrush": {
+    "config": { "id": "bonk", "generated": 1791190000 },
+    "data": {
+      "id": 59311,
+      "name": "Bonk",
+      "symbol": "BONK",
+      "price": 0.0000231,
+      "market_cap": 1790000000,
+      "galaxy_score": 62,
+      "alt_rank": 148,
+      "sentiment": 78,
+      "social_volume_24h": 4210,
+      "interactions_24h": 1832400
+    }
+  }
+}
