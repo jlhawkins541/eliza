@@ -64,7 +64,9 @@ EVM sign routes live in `src/chains/evm/routes/sign.ts`.
 plugins/plugin-wallet/
   auto-enable.ts               Auto-enable logic (env-read only, no service imports)
   characters/                  Crypto Queen character; runs on local Ollama via
-                               @elizaos/plugin-zerollama (README.md has the run steps)
+                               @elizaos/plugin-zerollama (README.md has the run steps,
+                               crypto-queen.env.example the settings for every plugin
+                               it loads)
   src/
     index.ts                   Package barrel — re-exports everything
     plugin.ts                  walletPlugin object (services/providers/actions/init/dispose)
@@ -72,6 +74,8 @@ plugins/plugin-wallet/
     contracts.ts               On-chain contract type definitions and exports
     register-routes.ts         Route registration helpers
     wallet-action.ts           Top-level wallet action re-export
+    characters/                Crypto Queen character test and `check:crypto-queen`
+                               setup check (Ollama models, Solana RPC and key, storage)
     actions/
       failure-codes.ts         Failure code constants
       intent-trajectory.ts     Intent trajectory types
@@ -188,6 +192,7 @@ bun run --cwd plugins/plugin-wallet test          # run package tests
 bun run --cwd plugins/plugin-wallet test:watch    # watch test lane
 bun run --cwd plugins/plugin-wallet build:views   # standalone view bundle → dist/views/bundle.js
 bun run --cwd plugins/plugin-wallet build:ui-types # UI declaration emit (tsconfig.ui.json)
+bun run --cwd plugins/plugin-wallet check:crypto-queen # check packages/agent/.env for the Crypto Queen agent
 ```
 
 `typecheck` runs both the Node tree (`tsconfig.json`, excludes `src/ui/**`) and the

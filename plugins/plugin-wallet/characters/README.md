@@ -18,32 +18,44 @@ through `@elizaos/plugin-zerollama`, so no cloud API key is needed.
    curl http://localhost:11434/api/tags   # both models should be listed
    ```
 
-3. From the repository root, set these variables in the terminal you will
-   start the agent from. A root `.env` file is not read by `bun run start`,
-   because that script runs inside `packages/agent`; putting the same lines in
-   `packages/agent/.env` also works.
-
-   macOS, Linux, or Termux:
+3. Copy the settings template into the file the agent reads, then fill it in:
 
    ```bash
-   export OLLAMA_BASE_URL=http://localhost:11434
-   export OLLAMA_SMALL_MODEL=llama3.1
-   export OLLAMA_LARGE_MODEL=llama3.1
-   export OLLAMA_EMBEDDING_MODEL=nomic-embed-text
-   export ELIZA_CHARACTER_PATH="$PWD/plugins/plugin-wallet/characters/crypto-queen.json"
+   cp plugins/plugin-wallet/characters/crypto-queen.env.example packages/agent/.env
    ```
 
    Windows PowerShell:
 
    ```powershell
-   $env:OLLAMA_BASE_URL = "http://localhost:11434"
-   $env:OLLAMA_SMALL_MODEL = "llama3.1"
-   $env:OLLAMA_LARGE_MODEL = "llama3.1"
-   $env:OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
-   $env:ELIZA_CHARACTER_PATH = "$PWD\plugins\plugin-wallet\characters\crypto-queen.json"
+   Copy-Item plugins\plugin-wallet\characters\crypto-queen.env.example packages\agent\.env
    ```
 
-4. From the repository root, run `bun install`, then `bun run start` for the
+   `bun run start` runs inside `packages/agent`, so it reads
+   `packages/agent/.env`, not a root `.env`. Shell variables override the file.
+   The template covers every plugin Crypto Queen loads:
+
+   - **Character**: `ELIZA_CHARACTER_PATH` points at `crypto-queen.json`.
+   - **`@elizaos/plugin-zerollama`**: `OLLAMA_BASE_URL` and the three
+     `OLLAMA_*_MODEL` names you pulled in step 2.
+   - **`@elizaos/plugin-wallet`**: `SOLANA_RPC_URL` (without it the wallet
+     skips Solana, so balances, `token_info` and Real trade don't work) and,
+     for real trades, `SOLANA_PRIVATE_KEY` of a separate hot wallet that holds
+     only trading funds. `WALLET_TERMINAL_MAX_BUY_SOL` caps each terminal buy.
+   - **`@elizaos/plugin-sql`**: nothing to set; it stores data in embedded
+     PGlite unless you give it `POSTGRES_URL`.
+
+   Never commit the filled-in `packages/agent/.env`; it holds your wallet key.
+
+4. Check the setup. This reads the same file, asks Ollama which models are
+   pulled, asks the Solana RPC for its health and the wallet's balance, and
+   prints PASS, WARN or FAIL per plugin with the step that fixes each failure.
+   It never prints the key.
+
+   ```bash
+   bun run --cwd plugins/plugin-wallet check:crypto-queen
+   ```
+
+5. From the repository root, run `bun install`, then `bun run start` for the
    agent alone or `bun run dev` for the agent with the app UI.
 
 ## If it still doesn't answer

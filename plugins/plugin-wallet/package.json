@@ -73,6 +73,7 @@
     "format:check": "bunx @biomejs/biome format .",
     "test": "vitest run --config ./vitest.config.ts",
     "test:watch": "vitest --config ./vitest.config.ts",
+    "check:crypto-queen": "bun src/characters/check-setup.ts",
     "clean": "node ../../packages/scripts/rm-path-recursive.mjs dist"
   },
   "peerDependencies": {
