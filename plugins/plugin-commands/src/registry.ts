@@ -282,6 +282,7 @@ export const DEFAULT_COMMANDS: ReadonlyArray<CommandDefinition> = [
 					"deepseek-coding",
 					"anthropic-api",
 					"openai-api",
+					"gemini-api",
 					"deepseek-api",
 					"zai-api",
 					"moonshot-api",

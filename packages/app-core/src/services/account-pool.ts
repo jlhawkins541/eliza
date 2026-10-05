@@ -143,6 +143,8 @@ const DIRECT_PROVIDER_BY_BACKEND: Readonly<
   anthropic: "anthropic-api",
   openai: "openai-api",
   gemini: "gemini-api",
+  google: "gemini-api",
+  "google-genai": "gemini-api",
   deepseek: "deepseek-api",
   zai: "zai-api",
   moonshot: "moonshot-api",

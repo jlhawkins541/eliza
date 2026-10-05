@@ -70,6 +70,76 @@ function recordedCalls(fetchMock: ReturnType<typeof vi.fn>): RecordedCall[] {
 
 const NOW = Date.now();
 
+describe("Gemini direct-account commands", () => {
+	beforeEach(() => initForRuntime("agent-accounts-backend"));
+	afterEach(() => vi.unstubAllGlobals());
+	it.each([
+		[
+			"use",
+			"work-max",
+			"PATCH",
+			"/api/accounts/gemini-api/acct-work-1234",
+			{ enabled: true },
+		],
+		[
+			"enable",
+			"work-max",
+			"PATCH",
+			"/api/accounts/gemini-api/acct-work-1234",
+			{ enabled: true },
+		],
+		[
+			"disable",
+			"work-max",
+			"PATCH",
+			"/api/accounts/gemini-api/acct-work-1234",
+			{ enabled: false },
+		],
+		[
+			"strategy",
+			"round-robin",
+			"PATCH",
+			"/api/providers/gemini-api/strategy",
+			{ strategy: "round-robin" },
+		],
+		[
+			"refresh",
+			"",
+			"POST",
+			"/api/accounts/gemini-api/acct-work-1234/refresh-usage",
+			undefined,
+		],
+	] as const)(
+		"dispatches %s for gemini-api",
+		async (action, value, method, path, body) => {
+			const payload = accountsPayload();
+			const provider = payload.providers[0];
+			if (!provider) throw new Error("fixture missing provider");
+			provider.providerId = "gemini-api";
+			const fetchMock = vi.fn(
+				async (_url: RequestInfo | URL, init?: RequestInit) =>
+					(init?.method ?? "GET") === "GET"
+						? jsonResponse(payload)
+						: jsonResponse({ ok: true }),
+			);
+			vi.stubGlobal("fetch", fetchMock);
+			const result = await resolveCommand(
+				makeRuntime(),
+				msg(`/accounts ${action} gemini-api ${value}`),
+				OWNER,
+			);
+			expect(result.handled).toBe(true);
+			expect(recordedCalls(fetchMock)).toContainEqual(
+				expect.objectContaining({
+					method,
+					url: expect.stringContaining(path),
+					...(body ? { body } : {}),
+				}),
+			);
+		},
+	);
+});
+
 function accountsPayload(overrides?: {
 	workEnabled?: boolean;
 	personalEnabled?: boolean;

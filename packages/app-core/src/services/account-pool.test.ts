@@ -1219,6 +1219,9 @@ describe("AccountPool drain-soonest-reset selection", () => {
   });
 
   it.each([
+    ["gemini", "gemini-api"],
+    ["google", "gemini-api"],
+    ["google-genai", "gemini-api"],
     ["openrouter", "openrouter-api"],
     // First-run persists the canonical `grok` backend for xAI; `xai` is the
     // compatibility alias.
@@ -1295,6 +1298,28 @@ describe("applyDirectProviderCredentialsToEnv fail-closed export", () => {
     expect(env.OPENAI_API_KEY).toBe("token-b");
     expect(env.OPENAI_BASE_URL).toBe("https://api.x.ai/v1");
   });
+
+  it.each(["gemini", "google", "google-genai"])(
+    "exports the pinned Gemini credential for the %s route",
+    async (backend) => {
+      configureDefaultAccountPoolSelection({
+        serviceRouting: {
+          llmText: { backend, accountIds: ["b"], strategy: "priority" },
+        },
+      });
+      const { env, deps, getToken } = harness(
+        {
+          "gemini-api:a": account("gemini-api", { id: "a", priority: 0 }),
+          "gemini-api:b": account("gemini-api", { id: "b", priority: 1 }),
+        },
+        { a: "synthetic-a", b: "synthetic-b" },
+      );
+      await applyDirectProviderCredentialsToEnv(backend, deps);
+      expect(getToken).toHaveBeenCalledWith("gemini-api", "b");
+      expect(getToken).not.toHaveBeenCalledWith("gemini-api", "a");
+      expect(env.GOOGLE_GENERATIVE_AI_API_KEY).toBe("synthetic-b");
+    },
+  );
 
   it.each([
     [
