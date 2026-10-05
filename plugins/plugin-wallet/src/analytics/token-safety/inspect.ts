@@ -9,7 +9,8 @@
  * checks, and flags come only from verified values.
  */
 import type { IAgentRuntime } from "@elizaos/core";
-import type { PublicKey } from "@solana/web3.js";
+import { NATIVE_MINT, NATIVE_MINT_2022 } from "@solana/spl-token";
+import type { EpochInfo, PublicKey } from "@solana/web3.js";
 import { toHuman } from "../../sdk/tokens/decimals.js";
 import { buildHolderConcentration } from "./concentration.js";
 import {
@@ -17,8 +18,14 @@ import {
   classifyMintAccount,
   decodeExtensions,
 } from "./mint.js";
-import { degradeRpc, readRpc, type TokenSafetyRpc } from "./rpc.js";
 import {
+  degradeRpc,
+  readRpc,
+  TokenSafetyMalformedResponseError,
+  type TokenSafetyRpc,
+} from "./rpc.js";
+import {
+  type FeeTier,
   INVALID_KIND_ERROR,
   TOKEN_SAFETY_CHECK_IDS,
   type TokenSafetyCheckId,
@@ -32,6 +39,31 @@ import {
 export type InspectOutcome =
   | { outcome: "report"; report: TokenSafetyReport }
   | { outcome: "invalid_input"; invalid: TokenSafetyInvalidInput };
+
+/**
+ * Accepts only a non-negative safe-integer epoch. web3.js types the field as
+ * a plain number, so a fractional or out-of-range value would otherwise reach
+ * `BigInt` and escape as an untyped RangeError that discards the report.
+ */
+function integerEpoch(info: EpochInfo): bigint {
+  const { epoch } = info;
+  if (!Number.isSafeInteger(epoch) || epoch < 0) {
+    throw new TokenSafetyMalformedResponseError(
+      `getEpochInfo returned epoch ${String(epoch)}, which is not a non-negative safe integer`,
+    );
+  }
+  return BigInt(epoch);
+}
+
+/** True for the wrapped-SOL mint of the program that owns the account. */
+function isNativeMint(
+  mint: PublicKey,
+  program: "spl-token" | "token-2022",
+): boolean {
+  return program === "spl-token"
+    ? mint.equals(NATIVE_MINT)
+    : mint.equals(NATIVE_MINT_2022);
+}
 
 /** Reads one mint through `rpc` and assembles the complete token_safety report or a typed invalid-input outcome. */
 export async function inspectSolanaTokenSafety(args: {
@@ -86,15 +118,9 @@ export async function inspectSolanaTokenSafety(args: {
   > => {
     if (fee.status === "decoded") return fee.check;
     const epochRead = await degradeRpc(runtime, "getEpochInfo", m, rpc, () =>
-      connection.getEpochInfo("confirmed"),
+      connection.getEpochInfo("confirmed").then(integerEpoch),
     );
-    return applyActiveFee(
-      fee.feeNeedsEpoch,
-      epochRead.ok
-        ? { ok: true, value: BigInt(epochRead.value.epoch) }
-        : epochRead,
-      decimals,
-    );
+    return applyActiveFee(fee.feeNeedsEpoch, epochRead, decimals);
   };
   const [transferFee, largestRead] = await Promise.all([
     resolveTransferFee(),
@@ -103,6 +129,7 @@ export async function inspectSolanaTokenSafety(args: {
     ),
   ]);
 
+  const nativeMint = isNativeMint(mint, program);
   const holderConcentration: TokenSafetyChecks["holder_concentration"] =
     largestRead.ok
       ? buildHolderConcentration({
@@ -111,6 +138,7 @@ export async function inspectSolanaTokenSafety(args: {
           supply: mintState.supply,
           supplySlot: context.slot,
           decimals,
+          nativeMint,
         })
       : largestRead.unknown;
 
@@ -125,6 +153,7 @@ export async function inspectSolanaTokenSafety(args: {
       raw: mintState.supply.toString(),
       ui: toHuman(mintState.supply, decimals),
       decimals,
+      nativeMint,
     },
     mint_authority: mintState.mintAuthority
       ? {
@@ -162,6 +191,7 @@ export async function inspectSolanaTokenSafety(args: {
       },
       checks,
       extensionInventory: decoded.inventory,
+      uiAmounts: decoded.uiAmounts,
       coverage: computeCoverage(checks),
       flags: deriveFlags(checks),
     },
@@ -194,6 +224,8 @@ export function computeCoverage(
       id === "holder_concentration" &&
       checks.holder_concentration.status === "verified" &&
       (checks.holder_concentration.top10ShareOfSupply.status === "unknown" ||
+        checks.holder_concentration.allReturnedShareOfSupply.status ===
+          "unknown" ||
         checks.holder_concentration.rows.some(
           (row) => row.shareOfSupply.status === "unknown",
         ))
@@ -207,6 +239,28 @@ export function computeCoverage(
     checksFullyVerified: TOKEN_SAFETY_CHECK_IDS.length - involved.size,
     unknown,
   };
+}
+
+/**
+ * The fee tiers that are in force now or can still take effect. Token-2022
+ * selects the newer tier once the current epoch reaches its epoch, and its
+ * SetTransferFee copies newer over older before scheduling again, so an older
+ * tier the epoch has passed never applies again. With the epoch unknown, the
+ * newer tier applies now or later, and the older tier could still be in force
+ * only if the newer tier starts after epoch 0.
+ */
+function applicableFeeTiers(
+  fee: Extract<
+    TokenSafetyChecks["transfer_fee"],
+    { status: "verified"; present: true }
+  >,
+): FeeTier[] {
+  const { active, older, newer } = fee;
+  if (active.status === "unknown") {
+    return newer.epoch === "0" ? [newer] : [older, newer];
+  }
+  if (active.basis === "tiers_identical") return [older];
+  return active.tier === "newer" ? [newer] : [older, newer];
 }
 
 /** Derives risk flags from verified checks only; there is no verdict or score. */
@@ -235,8 +289,9 @@ export function deriveFlags(checks: TokenSafetyChecks): TokenSafetyFlag[] {
       flags.push("transfer_fee_nonzero_active");
     }
     if (
-      nonzero(fee.older.basisPoints, fee.older.maximumFeeRaw) ||
-      nonzero(fee.newer.basisPoints, fee.newer.maximumFeeRaw)
+      applicableFeeTiers(fee).some((tier) =>
+        nonzero(tier.basisPoints, tier.maximumFeeRaw),
+      )
     ) {
       flags.push("transfer_fee_nonzero_scheduled");
     }

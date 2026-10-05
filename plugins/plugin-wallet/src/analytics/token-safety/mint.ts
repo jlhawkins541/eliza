@@ -44,6 +44,7 @@ import type {
   TokenSafetyChecks,
   TokenSafetyInvalidKind,
   TokenSafetyReport,
+  UiMultiplierExtension,
 } from "./types.js";
 
 const MINT_BYTES = 82;
@@ -264,6 +265,12 @@ const RISK = {
 } as const;
 type RiskCheckId = keyof typeof RISK;
 const RISK_TYPES: ReadonlySet<number> = new Set(Object.values(RISK));
+const UI_MULTIPLIER_TYPES: ReadonlyMap<number, UiMultiplierExtension> = new Map(
+  [
+    [ExtensionType.InterestBearingConfig, "InterestBearingConfig"],
+    [ExtensionType.ScaledUiAmountConfig, "ScaledUiAmountConfig"],
+  ],
+);
 
 type VerifiedTransferFee = Extract<
   TokenSafetyChecks["transfer_fee"],
@@ -293,6 +300,7 @@ export type DecodedExtensions = Pick<
   | "other_extensions"
 > & {
   inventory: TokenSafetyReport["extensionInventory"];
+  uiAmounts: TokenSafetyReport["uiAmounts"];
   transferFee:
     | { status: "decoded"; check: TokenSafetyChecks["transfer_fee"] }
     | { status: "needs_epoch"; feeNeedsEpoch: TransferFeeAwaitingEpoch };
@@ -334,6 +342,7 @@ export function decodeExtensions(
       pausable: absent(basis),
       other_extensions: { status: "verified", basis, entries: [] },
       inventory: { status: "verified", entries: [] },
+      uiAmounts: { status: "verified", multiplierExtensions: [] },
     };
   }
 
@@ -362,6 +371,11 @@ export function decodeExtensions(
         status: "unknown",
         code: "TOKEN_SAFETY_EXTENSION_DATA_MALFORMED",
         reason: `${walk.reason}; the extension list is unverified`,
+      },
+      uiAmounts: {
+        status: "unknown",
+        code: "TOKEN_SAFETY_EXTENSION_DATA_MALFORMED",
+        reason: `${walk.reason}; whether InterestBearingConfig or ScaledUiAmountConfig sets a display multiplier is unverified`,
       },
     };
   }
@@ -569,6 +583,13 @@ export function decodeExtensions(
         name: entry.name,
         length: entry.length,
       })),
+    },
+    uiAmounts: {
+      status: "verified",
+      multiplierExtensions: walk.entries.flatMap((entry) => {
+        const name = UI_MULTIPLIER_TYPES.get(entry.type);
+        return name === undefined ? [] : [name];
+      }),
     },
   };
 }

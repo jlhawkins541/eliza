@@ -32,15 +32,16 @@ export const evmPlugin: Plugin = {
   services: [EVMService] as ServiceClass[],
   actions: promoteSubactionsToActions(walletRouterAction as Action, {
     overrides: {
-      token_safety: {
+      onchain_token_safety: {
         description:
-          "subaction = token_safety: read-only on-chain Solana mint safety check from SOLANA_RPC_URL (param: address = mint); a check that could not run is UNKNOWN, never passed",
-        // plugin-x402-finance registers a parent action named
-        // CHECK_TOKEN_SAFETY. Core retrieval drops any simile equal to a
-        // registered parent name and exact parent names win, so this simile
-        // cannot take that action's calls; without it the legacy name is lost
-        // whenever x402-finance is not loaded.
-        similes: ["TOKEN_SECURITY", "CHECK_TOKEN_SAFETY"],
+          "subaction = onchain_token_safety: read-only on-chain Solana mint safety check from SOLANA_RPC_URL (param: address = mint); a check that could not run is UNKNOWN, never passed",
+        // Promotion always adds the upper-snake subaction name as a simile, so
+        // the subaction is named onchain_token_safety: plain TOKEN_SAFETY is a
+        // simile of plugin-x402-finance's CHECK_TOKEN_SAFETY action (its Base
+        // honeypot check), and a second claimant would make core retrieval
+        // drop it as ambiguous and let a first-registered lookup take its
+        // calls. For the same reason CHECK_TOKEN_SAFETY is not a simile here.
+        similes: ["TOKEN_SECURITY"],
       },
     },
   }) as Action[],

@@ -1,5 +1,5 @@
 /**
- * JSON-safe DTOs for the WALLET token_safety report. Every u64 is a decimal
+ * JSON-safe DTOs for the WALLET onchain_token_safety report. Every u64 is a decimal
  * string. Every field is required, and `null` appears only where the field
  * does not apply. A check that could not run is a typed `unknown` status with
  * its code and complete reason, never a pass, zero or omission.
@@ -52,7 +52,8 @@ export type TokenSafetyUnknownCode =
   | "TOKEN_SAFETY_UNRECOGNIZED_ENUM_VALUE"
   | "TOKEN_SAFETY_HOLDER_ROWS_INCONSISTENT"
   | "TOKEN_SAFETY_HOLDER_EXCEEDS_SUPPLY"
-  | "TOKEN_SAFETY_ZERO_SUPPLY";
+  | "TOKEN_SAFETY_ZERO_SUPPLY"
+  | "TOKEN_SAFETY_NATIVE_MINT_SUPPLY_UNTRACKED";
 
 export type Unknown<C extends TokenSafetyUnknownCode = TokenSafetyUnknownCode> =
   { status: "unknown"; code: C; reason: string };
@@ -67,10 +68,16 @@ export type ExtAddr = { state: "set"; address: string } | { state: "unset" };
 export type Authority =
   | { state: "present"; address: string }
   | { state: "revoked" };
-/** Share of supply as a 4-place percent string ("51.2300" or "<0.0001"). */
+/**
+ * Share of supply as a 4-place percent string ("51.2300" or "<0.0001"). The
+ * native (wrapped SOL) mints never count wrapped SOL in their supply field,
+ * so their shares are a typed unknown rather than a ratio against 0.
+ */
 export type Share =
   | { status: "verified"; percent: string }
-  | Unknown<"TOKEN_SAFETY_ZERO_SUPPLY">;
+  | Unknown<
+      "TOKEN_SAFETY_ZERO_SUPPLY" | "TOKEN_SAFETY_NATIVE_MINT_SUPPLY_UNTRACKED"
+    >;
 export type Absent = {
   status: "verified";
   present: false;
@@ -134,7 +141,14 @@ export type TokenSafetyChecks = {
     program: "spl-token" | "token-2022";
     programId: string;
   };
-  supply: { status: "verified"; raw: string; ui: string; decimals: number };
+  /** `nativeMint` marks the wrapped-SOL mint of either program, whose supply field does not count wrapped SOL. */
+  supply: {
+    status: "verified";
+    raw: string;
+    ui: string;
+    decimals: number;
+    nativeMint: boolean;
+  };
   mint_authority: { status: "verified" } & Authority;
   freeze_authority: { status: "verified" } & Authority;
   transfer_hook: ExtCheck<{ hookProgram: ExtAddr; authority: ExtAddr }>;
@@ -190,6 +204,9 @@ export type TokenSafetyChecks = {
  * Risk flags derived from verified checks only. `unassessed_extensions_present`
  * is raised for any entry in `other_extensions`: those extensions are listed
  * by name, but their configuration is never decoded or assessed.
+ * `transfer_fee_nonzero_scheduled` means a nonzero fee tier is in force now or
+ * can still take effect; an older tier that the current epoch has passed can
+ * never apply again and does not raise it.
  */
 export type TokenSafetyFlag =
   | "mint_authority_present"
@@ -207,6 +224,21 @@ export type TokenSafetyFlag =
   | "paused"
   | "unassessed_extensions_present";
 
+/** The two Token-2022 extensions that define a display multiplier for amounts. */
+export type UiMultiplierExtension =
+  | "InterestBearingConfig"
+  | "ScaledUiAmountConfig";
+
+/**
+ * How every `*Ui` figure in the report is derived: always raw / 10^decimals.
+ * Wallets show raw x multiplier / 10^decimals for a mint carrying a listed
+ * multiplier extension; that multiplier is not decoded, so the figures exclude
+ * it. Unknown when the extension list itself could not be read.
+ */
+export type UiAmountBasis =
+  | { status: "verified"; multiplierExtensions: UiMultiplierExtension[] }
+  | Unknown<"TOKEN_SAFETY_EXTENSION_DATA_MALFORMED">;
+
 export type TokenSafetyReport = {
   mint: string;
   source: { rpc: "SOLANA_RPC_URL"; commitment: "confirmed"; mintSlot: number };
@@ -217,6 +249,7 @@ export type TokenSafetyReport = {
         entries: Array<{ type: number; name: string; length: number }>;
       }
     | Unknown<"TOKEN_SAFETY_EXTENSION_DATA_MALFORMED">;
+  uiAmounts: UiAmountBasis;
   coverage: {
     checksTotal: 13;
     checksFullyVerified: number;
@@ -285,7 +318,7 @@ export function isTokenSafetyThrownCode(
   return Object.hasOwn(THROWN_CODE_FAILURE, code);
 }
 
-type Base = { actionName: "WALLET"; subaction: "token_safety" };
+type Base = { actionName: "WALLET"; subaction: "onchain_token_safety" };
 export type TokenSafetyActionData =
   | (Base & { outcome: "report"; report: TokenSafetyReport })
   | (Base & {

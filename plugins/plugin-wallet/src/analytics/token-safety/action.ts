@@ -1,8 +1,8 @@
 /**
- * The action boundary for WALLET `action=token_safety`. It parses parameters,
- * runs the key-free inspection, translates typed RPC and configuration
- * failures into structured WALLET results, and awaits the callback once with
- * the same text and data it returns.
+ * The action boundary for WALLET `action=onchain_token_safety`. It parses
+ * parameters, runs the key-free inspection, translates typed RPC and
+ * configuration failures into structured WALLET results, and awaits the
+ * callback once with the same text and data it returns.
  *
  * Only an ElizaError carrying a TokenSafetyThrownCode is translated; anything
  * else is a bug and propagates to core's ACTION_HANDLER_FAILED path. It never
@@ -71,7 +71,7 @@ export function parseTokenSafetyParams(
     return invalid(
       "missing_address",
       null,
-      "token_safety needs the Solana mint address in the address parameter.",
+      "onchain_token_safety needs the Solana mint address in the address parameter.",
     );
   }
   if (distinct.length > 1) {
@@ -90,14 +90,14 @@ export function parseTokenSafetyParams(
     return invalid(
       "unsupported_chain",
       address,
-      `token_safety reads Solana mints only; chain "${raw.chain.trim()}" is not supported.`,
+      `onchain_token_safety reads Solana mints only; chain "${raw.chain.trim()}" is not supported.`,
     );
   }
   if (/^0x/i.test(address)) {
     return invalid(
       "malformed_address",
       address,
-      "token_safety reads Solana mint addresses only; 0x… is an EVM address.",
+      "onchain_token_safety reads Solana mint addresses only; 0x… is an EVM address.",
     );
   }
   try {
@@ -159,13 +159,16 @@ async function respond(
   };
 }
 
-/** Handles WALLET `action=token_safety` for one Solana mint address. */
+/** Handles WALLET `action=onchain_token_safety` for one Solana mint address. */
 export async function tokenSafetyHandler(
   runtime: IAgentRuntime,
   raw: Record<string, unknown>,
   callback?: HandlerCallback,
 ): Promise<ActionResult> {
-  const base = { actionName: "WALLET", subaction: "token_safety" } as const;
+  const base = {
+    actionName: "WALLET",
+    subaction: "onchain_token_safety",
+  } as const;
   const parsed = parseTokenSafetyParams(raw);
   if (!parsed.ok) {
     return respond(
@@ -185,7 +188,7 @@ export async function tokenSafetyHandler(
     const rpc = createTokenSafetyRpc(runtime);
     outcome = await inspectSolanaTokenSafety({ runtime, rpc, mint });
   } catch (error) {
-    // error-policy:J1 Action boundary: typed token-safety RPC/configuration failures become the structured WALLET token_safety failure the planner reads.
+    // error-policy:J1 Action boundary: typed token-safety RPC/configuration failures become the structured WALLET onchain_token_safety failure the planner reads.
     if (!(isElizaError(error) && isTokenSafetyThrownCode(error.code))) {
       throw error;
     }

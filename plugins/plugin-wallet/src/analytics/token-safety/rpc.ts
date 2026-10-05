@@ -1,8 +1,9 @@
 /**
- * Builds the key-free, read-only Solana Connection that token_safety uses,
- * from SOLANA_RPC_URL only, and classifies web3.js failures into typed
+ * Builds the key-free, read-only Solana Connection that onchain_token_safety
+ * uses, from SOLANA_RPC_URL only, and classifies web3.js failures into typed
  * ElizaErrors. The RPC URL can embed an API key, so it never enters error
- * context, logs, data or text: every message passes through `redact` first.
+ * context, logs, data or text: every message passes through `redact` first,
+ * and a wrapped cause carries only a redacted copy of the original message.
  *
  * There is no fallback endpoint and no SolanaService, Helius or cloud proxy
  * involvement. Retries on HTTP 429 are disabled so one call makes one request,
@@ -32,9 +33,32 @@ const SETTING = "SOLANA_RPC_URL";
 const MIN_COMPONENT_SECRET_LENGTH = 8;
 const CREDENTIAL_PARAM = /key|token|secret|auth|pass|sig|cred/i;
 
-function urlInvalid(cause?: unknown): ElizaError {
+/**
+ * A provider response that parsed but carries a value the read cannot use
+ * (for example a fractional epoch). It is classified as MALFORMED_RESPONSE,
+ * so an independent sub-read degrades instead of discarding the report.
+ */
+export class TokenSafetyMalformedResponseError extends Error {
+  override name = "TokenSafetyMalformedResponseError";
+}
+
+/**
+ * Copies an error's name and message through `redact` so a cause kept for
+ * diagnostics cannot carry the endpoint (web3.js and Bun echo the raw URL).
+ */
+function redactedCause(
+  cause: unknown,
+  redact: (text: string) => string,
+): Error | undefined {
+  if (!(cause instanceof Error)) return undefined;
+  const copy = new Error(redact(cause.message));
+  copy.name = cause.name;
+  return copy;
+}
+
+function urlInvalid(cause?: Error): ElizaError {
   return new ElizaError(
-    "SOLANA_RPC_URL is not a valid http(s) URL; token_safety reads only from that endpoint.",
+    "SOLANA_RPC_URL is not a valid http(s) URL; onchain_token_safety reads only from that endpoint.",
     {
       code: "TOKEN_SAFETY_RPC_URL_INVALID",
       ...(cause === undefined ? {} : { cause }),
@@ -53,7 +77,7 @@ export function createTokenSafetyRpc(
   const trimmed = typeof setting === "string" ? setting.trim() : "";
   if (trimmed === "") {
     throw new ElizaError(
-      "SOLANA_RPC_URL is not configured; token_safety reads only from that endpoint.",
+      "SOLANA_RPC_URL is not configured; onchain_token_safety reads only from that endpoint.",
       {
         code: "TOKEN_SAFETY_RPC_NOT_CONFIGURED",
         context: { setting: SETTING, method: "configuration" },
@@ -65,8 +89,10 @@ export function createTokenSafetyRpc(
   try {
     url = new URL(trimmed);
   } catch (cause) {
-    // error-policy:J2 A malformed SOLANA_RPC_URL becomes a typed configuration error that keeps the cause; the value may embed a key, so it stays out of context.
-    throw urlInvalid(cause);
+    // error-policy:J2 A malformed SOLANA_RPC_URL becomes a typed configuration error with a redacted copy of the cause; the value may embed a key, so it stays out of context and messages.
+    throw urlInvalid(
+      redactedCause(cause, (text) => text.split(trimmed).join(REDACTED)),
+    );
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw urlInvalid();
@@ -128,11 +154,21 @@ export function createTokenSafetyRpc(
 
   const fetchMiddleware: FetchMiddleware = (info, init, next) =>
     next(info, { ...init, signal: AbortSignal.timeout(timeoutMs) });
-  const connection = new Connection(trimmed, {
-    commitment: "confirmed",
-    disableRetryOnRateLimit: true,
-    fetchMiddleware,
-  });
+  // web3.js validates the endpoint with its own case-sensitive pattern, which
+  // rejects WHATWG-valid spellings (`https:/host`, `https:host`, `HTTPS://`)
+  // and empty-username userinfo; the serialized `url.href` satisfies it
+  // wherever a request is possible.
+  let connection: Connection;
+  try {
+    connection = new Connection(url.href, {
+      commitment: "confirmed",
+      disableRetryOnRateLimit: true,
+      fetchMiddleware,
+    });
+  } catch (cause) {
+    // error-policy:J2 web3.js rejects the endpoint with a message that embeds it; the typed static-message URL_INVALID keeps only a redacted copy of that cause.
+    throw urlInvalid(redactedCause(cause, redact));
+  }
   return { connection, redact };
 }
 
@@ -203,7 +239,15 @@ function classifyRpcFailure(cause: Error): Classified {
       httpStatus: null,
     };
   }
-  if (cause.name === "StructError") {
+  // A body that is not the expected shape (StructError), a value the read
+  // cannot use, or a 200 body that is not JSON at all (an HTML or text page
+  // from a CDN or WAF, which JSON.parse rejects with a SyntaxError naming
+  // JSON) is a provider failure shape. Any other SyntaxError is a bug.
+  if (
+    cause.name === "StructError" ||
+    cause instanceof TokenSafetyMalformedResponseError ||
+    (cause.name === "SyntaxError" && /\bJSON\b/.test(cause.message))
+  ) {
     return {
       code: "TOKEN_SAFETY_RPC_MALFORMED_RESPONSE",
       rpcErrorCode: null,

@@ -1,12 +1,15 @@
 /**
- * Renders the complete model-facing `solana_token_safety:` block. Every check
+ * Renders the complete model-facing `onchain_token_safety:` block. Every check
  * line, every extension, every returned holder row and every full base58
  * address is printed; nothing is sliced or capped. Wording avoids the
  * completion verbs and holding words that core egress checks for, and no
  * clause is a bare "<number> <word>" pair, so a reply quoting the block is not
  * read as a completed action or as an ungrounded holding claim. Free text that
  * can span lines (provider error bodies, echoed inputs) is escaped reversibly
- * onto its own line; the data keeps the raw value.
+ * onto its own line; the data keeps the raw value. When the mint carries a
+ * display-multiplier extension (or the extension list is unreadable), every
+ * decimal amount is labelled raw-decimal and a `ui_amounts:` line names the
+ * extension whose multiplier those figures exclude.
  */
 import {
   type ActiveFee,
@@ -19,6 +22,7 @@ import {
   type TokenSafetyChecks,
   type TokenSafetyInvalidInput,
   type TokenSafetyReport,
+  type UiMultiplierExtension,
   type Unknown,
 } from "./types.js";
 
@@ -66,12 +70,28 @@ function unknownLine(check: Unknown): string {
   return `${unknownInline(check)}.`;
 }
 
+/** Appends the raw-decimal label to a decimal amount when a display multiplier may apply. */
+type UiLabel = (decimal: string) => string;
+
+const MULTIPLIER_TYPE: Readonly<Record<UiMultiplierExtension, number>> = {
+  InterestBearingConfig: 10,
+  ScaledUiAmountConfig: 25,
+};
+
+function uiLabel(report: TokenSafetyReport): UiLabel {
+  const basis = report.uiAmounts;
+  return basis.status === "verified" && basis.multiplierExtensions.length === 0
+    ? (decimal) => decimal
+    : (decimal) => `${decimal} raw-decimal`;
+}
+
 function maximum(
   tier: Pick<FeeTier, "maximumIsU64Max" | "maximumFeeUi" | "maximumFeeRaw">,
+  ui: UiLabel,
 ): string {
   return tier.maximumIsU64Max
     ? "no cap (u64 max)"
-    : `${tier.maximumFeeUi} (raw ${tier.maximumFeeRaw})`;
+    : `${ui(tier.maximumFeeUi)} (raw ${tier.maximumFeeRaw})`;
 }
 
 function addrOr(
@@ -82,14 +102,29 @@ function addrOr(
   return addr.state === "set" ? whenSet(addr.address) : whenUnset;
 }
 
-function activeFee(active: ActiveFee): string {
+function activeFee(active: ActiveFee, ui: UiLabel): string {
   if (active.status === "unknown") {
     return `active fee ${unknownInline(active)}`;
   }
   if (active.basis === "tiers_identical") {
-    return `active fee ${active.basisPoints} bps, maximum ${maximum(active)}: both tiers are identical, so the current epoch does not change it`;
+    return `active fee ${active.basisPoints} bps, maximum ${maximum(active, ui)}: both tiers are identical, so the current epoch does not change it`;
   }
-  return `active fee at epoch ${active.currentEpoch}: ${active.tier} tier at ${active.basisPoints} bps, maximum ${maximum(active)}`;
+  return `active fee at epoch ${active.currentEpoch}: ${active.tier} tier at ${active.basisPoints} bps, maximum ${maximum(active, ui)}`;
+}
+
+/**
+ * States which tier applies next, independent of the fee config authority: a
+ * newer tier that differs takes effect at its epoch with no further signature
+ * even when that authority is unset.
+ */
+function feeSchedule(active: ActiveFee, newer: FeeTier): string | null {
+  if (active.status === "unknown") {
+    return `the newer tier applies from epoch ${newer.epoch} onward without any further signature, and whether that epoch has been reached is unverified`;
+  }
+  if (active.basis === "tiers_identical") return null;
+  return active.tier === "older"
+    ? `the newer tier takes effect at epoch ${newer.epoch} without any further signature`
+    : "the older tier can no longer apply";
 }
 
 function shareText(share: Share): string {
@@ -121,6 +156,7 @@ function extensionState<C>(
 function checkLines(
   id: (typeof TOKEN_SAFETY_CHECK_IDS)[number],
   checks: TokenSafetyChecks,
+  ui: UiLabel,
 ): string[] {
   switch (id) {
     case "token_program": {
@@ -131,7 +167,12 @@ function checkLines(
     }
     case "supply": {
       const c = checks.supply;
-      return [`verified — ${c.ui} (raw ${c.raw}, decimals ${c.decimals})`];
+      const native = c.nativeMint
+        ? "; this is the native wrapped-SOL mint, whose supply field does not count wrapped SOL"
+        : "";
+      return [
+        `verified — ${ui(c.ui)} (raw ${c.raw}, decimals ${c.decimals})${native}`,
+      ];
     }
     case "mint_authority": {
       const c = checks.mint_authority;
@@ -169,11 +210,12 @@ function checkLines(
       const c = extensionState(checks.transfer_fee, "TransferFeeConfig");
       if (typeof c === "string") return [c];
       const tier = (label: string, t: FeeTier) =>
-        `${label} tier from epoch ${t.epoch}: ${t.basisPoints} bps, maximum ${maximum(t)}`;
+        `${label} tier from epoch ${t.epoch}: ${t.basisPoints} bps, maximum ${maximum(t, ui)}`;
+      const schedule = feeSchedule(c.active, c.newer);
       const configAuthority = addrOr(
         c.transferFeeConfigAuthority,
         (a) => `fee config authority ${a} can schedule a new fee`,
-        "fee config authority NOT SET (the fee cannot be changed)",
+        "fee config authority NOT SET (no new fee can be scheduled)",
       );
       const withdrawAuthority = addrOr(
         c.withdrawWithheldAuthority,
@@ -181,7 +223,16 @@ function checkLines(
         "withdraw-withheld authority NOT SET",
       );
       return [
-        `verified — TransferFeeConfig PRESENT; ${tier("older", c.older)}; ${tier("newer", c.newer)}; ${activeFee(c.active)}; ${configAuthority}; ${withdrawAuthority}; withheld on mint ${c.withheldAmountUi} (raw ${c.withheldAmountRaw})`,
+        [
+          "verified — TransferFeeConfig PRESENT",
+          tier("older", c.older),
+          tier("newer", c.newer),
+          activeFee(c.active, ui),
+          ...(schedule === null ? [] : [schedule]),
+          configAuthority,
+          withdrawAuthority,
+          `withheld on mint ${ui(c.withheldAmountUi)} (raw ${c.withheldAmountRaw})`,
+        ].join("; "),
       ];
     }
     case "permanent_delegate": {
@@ -283,7 +334,7 @@ function checkLines(
       const head = `verified — getTokenLargestAccounts at slot ${c.slot} returned ${accounts} (the RPC returns at most ${c.rpcMaxRows}). These are token ACCOUNTS, not owners: one owner can control several accounts, and an account can be a pool, exchange or program vault. Shares use the supply read at slot ${c.supplySlot}, rounded down to 4 decimal places. Top 10: ${shareText(c.top10ShareOfSupply)}; all ${c.rowsReturned} returned: ${shareText(c.allReturnedShareOfSupply)}.`;
       const rows = c.rows.map(
         (row) =>
-          `  #${row.rank} ${row.tokenAccount} amount ${row.amountUi} (raw ${row.amountRaw}): ${shareText(row.shareOfSupply)}, cumulative ${cumulativeText(row.cumulativeShareOfSupply)}`,
+          `  #${row.rank} ${row.tokenAccount} amount ${ui(row.amountUi)} (raw ${row.amountRaw}): ${shareText(row.shareOfSupply)}, cumulative ${cumulativeText(row.cumulativeShareOfSupply)}`,
       );
       return [head, ...rows];
     }
@@ -305,11 +356,27 @@ function extensionsLine(report: TokenSafetyReport): string {
     .join(", ")}`;
 }
 
+/** Names the display multiplier the decimal amounts exclude, or null when none applies. */
+function uiAmountsLine(report: TokenSafetyReport): string | null {
+  const basis = report.uiAmounts;
+  const derivation =
+    "decimal amounts in this report are raw-decimal (raw / 10^decimals)";
+  if (basis.status === "unknown") {
+    return `${derivation}; a display multiplier is ${unknownLine(basis)}`;
+  }
+  if (basis.multiplierExtensions.length === 0) return null;
+  const names = basis.multiplierExtensions
+    .map((name) => `${name} (type ${MULTIPLIER_TYPE[name]})`)
+    .join(" and ");
+  return `${derivation} and exclude the display multiplier of ${names}, which is not decoded; apps that apply the multiplier show different figures. Shares of supply are ratios, so the multiplier does not change them.`;
+}
+
 /** Renders the complete report block with one line per check and every holder row. */
 export function formatTokenSafetyReport(report: TokenSafetyReport): string {
   const { coverage } = report;
+  const ui = uiLabel(report);
   const lines = [
-    "solana_token_safety:",
+    "onchain_token_safety:",
     "  status: report",
     `  mint: ${report.mint}`,
     `  source: Solana RPC from SOLANA_RPC_URL; mint account read at slot ${report.source.mintSlot}`,
@@ -319,11 +386,13 @@ export function formatTokenSafetyReport(report: TokenSafetyReport): string {
     "  checks:",
   ];
   for (const id of TOKEN_SAFETY_CHECK_IDS) {
-    const [first, ...rest] = checkLines(id, report.checks);
+    const [first, ...rest] = checkLines(id, report.checks, ui);
     lines.push(`    ${id}: ${first}`);
     for (const extra of rest) lines.push(`    ${extra}`);
   }
   lines.push(`  extensions: ${extensionsLine(report)}`);
+  const uiAmounts = uiAmountsLine(report);
+  if (uiAmounts !== null) lines.push(`  ui_amounts: ${uiAmounts}`);
   lines.push(
     `  flags: ${report.flags.length === 0 ? "none" : report.flags.join(", ")}`,
   );
@@ -336,7 +405,7 @@ export function formatTokenSafetyInvalid(
   invalid: TokenSafetyInvalidInput,
 ): string {
   const lines = [
-    "solana_token_safety:",
+    "onchain_token_safety:",
     "  status: invalid_input",
     `  error: ${invalid.error}`,
     `  kind: ${invalid.kind}`,
@@ -364,7 +433,7 @@ export function formatTokenSafetyRpcFailure(
       ? "The mint account could not be read, so no check was performed. Nothing about this token is verified."
       : `The ${failure.method} read failed unexpectedly, so no report was produced. Nothing about this token is verified.`;
   return [
-    "solana_token_safety:",
+    "onchain_token_safety:",
     "  status: rpc_failure",
     `  error: ${data.error}`,
     `  code: ${failure.code}`,

@@ -11,7 +11,12 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import {
+  NATIVE_MINT,
+  NATIVE_MINT_2022,
+  TOKEN_2022_PROGRAM_ID,
+  TOKEN_PROGRAM_ID,
+} from "@solana/spl-token";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
@@ -143,6 +148,7 @@ describe("inspectSolanaTokenSafety — SPL Token", () => {
       raw: "18446744073709551615",
       ui: "18446744073.709551615",
       decimals: 9,
+      nativeMint: false,
     });
     expect(r.checks.mint_authority).toEqual({
       status: "verified",
@@ -1038,4 +1044,66 @@ describe("installed spl-token version in the report text", () => {
       `ConfidentialTransferFeeConfig (type 16; not decodable by the installed @solana/spl-token ${installed})`,
     );
   });
+});
+
+describe("inspectSolanaTokenSafety — native wrapped-SOL mints", () => {
+  // Wrapping SOL deposits lamports and mints nothing, so a native mint's
+  // supply field stays 0 while its token accounts hold large balances.
+  it.each([
+    ["SPL Token", TOKEN_PROGRAM_ID, NATIVE_MINT],
+    ["Token-2022", TOKEN_2022_PROGRAM_ID, NATIVE_MINT_2022],
+  ])(
+    "reports every %s native-mint share as untracked, never as rows exceeding supply",
+    async (_name, program, nativeMint) => {
+      const fixture = await startSolanaRpcFixture({
+        getAccountInfo: mintAccount(program, { supply: 0n, decimals: 9 }),
+        getTokenLargestAccounts: {
+          result: largestAccountsResult(
+            [
+              {
+                address: key(91).toBase58(),
+                amount: "7000000000",
+                decimals: 9,
+              },
+              {
+                address: key(92).toBase58(),
+                amount: "3000000000",
+                decimals: 9,
+              },
+            ],
+            HOLDER_SLOT,
+          ),
+        },
+      });
+      open.push(fixture);
+      const runtime = plainRuntime({ SOLANA_RPC_URL: fixture.url });
+      const result = await inspectSolanaTokenSafety({
+        runtime: asAgentRuntime(runtime),
+        rpc: createTokenSafetyRpc(runtime),
+        mint: nativeMint,
+      });
+      const r = report(result);
+      const holders = r.checks.holder_concentration;
+      if (holders.status !== "verified")
+        throw new Error(
+          `expected verified rows, got ${JSON.stringify(holders)}`,
+        );
+      expect(holders.rows).toHaveLength(2);
+      const untracked = expect.objectContaining({
+        status: "unknown",
+        code: "TOKEN_SAFETY_NATIVE_MINT_SUPPLY_UNTRACKED",
+      });
+      for (const row of holders.rows) {
+        expect(row.shareOfSupply).toEqual(untracked);
+        expect(row.cumulativeShareOfSupply).toEqual(untracked);
+      }
+      expect(holders.top10ShareOfSupply).toEqual(untracked);
+      expect(holders.allReturnedShareOfSupply).toEqual(untracked);
+      expect(r.checks.supply).toEqual(
+        expect.objectContaining({ nativeMint: true }),
+      );
+      expect(JSON.stringify(r)).not.toContain("HOLDER_EXCEEDS_SUPPLY");
+      expect(formatTokenSafetyReport(r)).not.toMatch(/\d% of supply/);
+    },
+  );
 });

@@ -1,5 +1,5 @@
 /**
- * Keyless per-plugin e2e for WALLET `action=token_safety`.
+ * Keyless per-plugin e2e for WALLET `action=onchain_token_safety`.
  *
  * The seed starts the deterministic loopback Solana JSON-RPC fixture and
  * points SOLANA_RPC_URL at it, so the real WALLET handler reads a byte-exact
@@ -46,7 +46,7 @@ export default scenario({
   domain: "wallet",
   tags: ["smoke", "wallet", "analytics", "solana"],
   description:
-    "Checks a Token-2022 mint through the WALLET action (action=token_safety) against a deterministic loopback Solana JSON-RPC server — keyless, no signer, no live network.",
+    "Checks a Token-2022 mint through the WALLET action (action=onchain_token_safety) against a deterministic loopback Solana JSON-RPC server — keyless, no signer, no live network.",
 
   requires: {
     plugins: ["@elizaos/plugin-wallet"],
@@ -125,7 +125,8 @@ export default scenario({
             },
             response: {
               text: "",
-              thought: "Read the mint on-chain with WALLET token_safety.",
+              thought:
+                "Read the mint on-chain with WALLET onchain_token_safety.",
               messageToUser: "",
               completed: true,
               finishReason: "tool-calls",
@@ -134,7 +135,7 @@ export default scenario({
                   id: "call-token-safety",
                   name: WALLET,
                   type: "function",
-                  arguments: { action: "token_safety", address: MINT },
+                  arguments: { action: "onchain_token_safety", address: MINT },
                 },
               ],
             },
@@ -148,7 +149,7 @@ export default scenario({
             response: {
               success: true,
               decision: "FINISH",
-              thought: "The token_safety report is complete.",
+              thought: "The onchain_token_safety report is complete.",
               messageToUser: REPLY,
             },
             times: 1,
@@ -183,7 +184,7 @@ export default scenario({
       text: `Is the mint ${MINT} safe? Read its authorities, extensions and largest accounts on Solana.`,
       // Carry the wallet discriminator on the inbound message so WALLET's
       // structural validate() recognizes the analytics subaction.
-      content: { action: "token_safety", address: MINT },
+      content: { action: "onchain_token_safety", address: MINT },
       timeoutMs: 120_000,
       assertTurn: (turn) => {
         const call = turn.actionsCalled.find((a) => a.actionName === WALLET);
@@ -232,8 +233,8 @@ export default scenario({
             ? (call.result.data as Record<string, unknown>)
             : null;
         if (!data) return "successful WALLET call carried no result.data";
-        if (data.subaction !== "token_safety") {
-          return `expected result.data.subaction "token_safety", saw ${String(data.subaction)}`;
+        if (data.subaction !== "onchain_token_safety") {
+          return `expected result.data.subaction "onchain_token_safety", saw ${String(data.subaction)}`;
         }
         if (data.outcome !== "report") {
           return `expected result.data.outcome "report", saw ${String(data.outcome)}`;

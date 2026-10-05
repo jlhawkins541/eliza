@@ -3,6 +3,9 @@
  * BigInt arithmetic. The rows are the largest token ACCOUNTS, not owners, and
  * the RPC returns at most 20. Every row is kept, in RPC order; inconsistent
  * rows make the whole section a typed unknown rather than a partial table.
+ * The native wrapped-SOL mints never count wrapped SOL in their supply field,
+ * so their rows are kept with every share a typed unknown instead of being
+ * compared with that field.
  */
 import type { TokenAccountBalancePair } from "@solana/web3.js";
 import { toHuman } from "../../sdk/tokens/decimals.js";
@@ -26,6 +29,13 @@ export function sharePercent(amount: bigint, supply: bigint): Share {
   };
 }
 
+const NATIVE_SUPPLY_UNTRACKED: Share = {
+  status: "unknown",
+  code: "TOKEN_SAFETY_NATIVE_MINT_SUPPLY_UNTRACKED",
+  reason:
+    "this is the native wrapped-SOL mint, whose supply field does not count wrapped SOL, so no share of supply can be computed",
+};
+
 /** Validates the largest-account rows against the mint and computes per-row and cumulative shares. */
 export function buildHolderConcentration(args: {
   rows: readonly TokenAccountBalancePair[];
@@ -33,8 +43,11 @@ export function buildHolderConcentration(args: {
   supply: bigint;
   supplySlot: number;
   decimals: number;
+  nativeMint: boolean;
 }): TokenSafetyChecks["holder_concentration"] {
-  const { rows, slot, supply, supplySlot, decimals } = args;
+  const { rows, slot, supply, supplySlot, decimals, nativeMint } = args;
+  const share = (amount: bigint): Share =>
+    nativeMint ? NATIVE_SUPPLY_UNTRACKED : sharePercent(amount, supply);
   const inconsistent = (
     reason: string,
   ): TokenSafetyChecks["holder_concentration"] => ({
@@ -66,7 +79,7 @@ export function buildHolderConcentration(args: {
     }
     seen.add(account);
   }
-  if (supply > 0n && rows.length === 0) {
+  if (!nativeMint && supply > 0n && rows.length === 0) {
     return inconsistent(
       `the response lists no token accounts although the supply is ${supply} raw; shares are unverified`,
     );
@@ -85,21 +98,24 @@ export function buildHolderConcentration(args: {
     slot,
     supplySlot,
   });
-  let total = 0n;
-  for (const row of rows) {
-    const amount = BigInt(row.amount);
-    if (amount > supply) {
-      return exceeds(`token account ${row.address.toBase58()} shows`, amount);
+  if (!nativeMint) {
+    let total = 0n;
+    for (const row of rows) {
+      const amount = BigInt(row.amount);
+      if (amount > supply) {
+        return exceeds(`token account ${row.address.toBase58()} shows`, amount);
+      }
+      total += amount;
     }
-    total += amount;
-  }
-  // Rows that each fit under the supply can still sum above it (a mint or burn
-  // between the two reads); a cumulative share above 100% is never verified.
-  if (total > supply) {
-    return exceeds(
-      `the ${rows.length} returned token accounts together show`,
-      total,
-    );
+    // Rows that each fit under the supply can still sum above it (a mint or
+    // burn between the two reads); a cumulative share above 100% is never
+    // verified.
+    if (total > supply) {
+      return exceeds(
+        `the ${rows.length} returned token accounts together show`,
+        total,
+      );
+    }
   }
 
   let cumulative = 0n;
@@ -113,8 +129,8 @@ export function buildHolderConcentration(args: {
       tokenAccount: row.address.toBase58(),
       amountRaw: row.amount,
       amountUi: toHuman(amount, decimals),
-      shareOfSupply: sharePercent(amount, supply),
-      cumulativeShareOfSupply: sharePercent(cumulative, supply),
+      shareOfSupply: share(amount),
+      cumulativeShareOfSupply: share(cumulative),
     };
   });
   return {
@@ -126,7 +142,7 @@ export function buildHolderConcentration(args: {
     rowsReturned: rows.length,
     label: "token_accounts_not_owners",
     rows: holderRows,
-    top10ShareOfSupply: sharePercent(top10, supply),
-    allReturnedShareOfSupply: sharePercent(cumulative, supply),
+    top10ShareOfSupply: share(top10),
+    allReturnedShareOfSupply: share(cumulative),
   };
 }
