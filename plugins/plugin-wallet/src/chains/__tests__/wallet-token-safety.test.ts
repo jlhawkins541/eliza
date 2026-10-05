@@ -288,7 +288,11 @@ describe("WALLET onchain_token_safety dispatch", () => {
     );
   });
 
-  it.each(["CHECK_TOKEN_SAFETY", "TOKEN_SAFETY", "token_safety"])(
+  // TOKEN_SAFETY and token_safety are the GoPlus subaction's names on this
+  // branch (dispatching them would call the GoPlus API), so only the
+  // unclaimed x402 action name is driven through the handler here; the
+  // catalog and resolver tests below pin that none of them reach this check.
+  it.each(["CHECK_TOKEN_SAFETY"])(
     "does not route %s, which belongs to plugin-x402-finance, to the Solana check",
     async (action) => {
       const server = await fixture(fullHandlers());
@@ -330,7 +334,7 @@ describe("WALLET onchain_token_safety beside plugin-x402-finance", () => {
     error: () => undefined,
   };
 
-  it("leaves TOKEN_SAFETY and CHECK_TOKEN_SAFETY claimed only by the x402 action in core's catalog", () => {
+  it("adds no on-chain claim on TOKEN_SAFETY or CHECK_TOKEN_SAFETY in core's catalog", () => {
     const catalog = buildActionCatalog([
       ...walletActions,
       x402CheckTokenSafety,
@@ -349,8 +353,14 @@ describe("WALLET onchain_token_safety beside plugin-x402-finance", () => {
         )
         .map((parent) => parent.name);
     // core retrieval drops a simile claimed by more than one catalog parent
-    // as ambiguous, so a second claimant would silence the x402 hint.
-    expect(claimants("TOKEN_SAFETY")).toEqual(["CHECK_TOKEN_SAFETY"]);
+    // as ambiguous, so the on-chain check must never add a claim on the x402
+    // names.
+    const onchain = walletActions.find(
+      (action) => action.name === "WALLET_ONCHAIN_TOKEN_SAFETY",
+    );
+    if (!onchain) throw new Error("WALLET_ONCHAIN_TOKEN_SAFETY not promoted");
+    expect(onchain.similes).not.toContain("TOKEN_SAFETY");
+    expect(onchain.similes).not.toContain("CHECK_TOKEN_SAFETY");
     expect(claimants("CHECK_TOKEN_SAFETY")).toEqual(["CHECK_TOKEN_SAFETY"]);
     expect(claimants("ONCHAIN_TOKEN_SAFETY")).toEqual(["WALLET"]);
     expect(claimants("TOKEN_SECURITY")).toEqual(["WALLET"]);
@@ -363,12 +373,14 @@ describe("WALLET onchain_token_safety beside plugin-x402-finance", () => {
     ],
     ["x402 registered first", [x402CheckTokenSafety, ...walletActions]],
   ])(
-    "resolves the x402 names to the x402 action and the Solana names to the wallet virtual with %s",
+    "never resolves the x402 names to the on-chain check, and resolves its own names to it, with %s",
     (_label, actions) => {
       const runtime = { actions, logger: silentLogger };
       const resolve = (name: string) =>
         resolvePlannerActionName(runtime, undefined, name);
-      expect(resolve("TOKEN_SAFETY")).toEqual(["CHECK_TOKEN_SAFETY"]);
+      expect(resolve("TOKEN_SAFETY")).not.toContain(
+        "WALLET_ONCHAIN_TOKEN_SAFETY",
+      );
       expect(resolve("CHECK_TOKEN_SAFETY")).toEqual(["CHECK_TOKEN_SAFETY"]);
       expect(resolve("ONCHAIN_TOKEN_SAFETY")).toEqual([
         "WALLET_ONCHAIN_TOKEN_SAFETY",

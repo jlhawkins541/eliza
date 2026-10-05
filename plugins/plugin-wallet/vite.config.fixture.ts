@@ -1,4 +1,9 @@
-/** Local browser-QA harness for the Wallet view. Not part of the shipped bundle. */
+/**
+ * Local browser-QA harness for the Wallet and crypto terminal views. Not part
+ * of the shipped bundle. The dev server mounts the real terminal market and
+ * token safety routes so `terminal.html` renders live data through the
+ * production handlers.
+ */
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,12 +31,40 @@ const { default: react } = await import(
   uiRequire.resolve("@vitejs/plugin-react-swc")
 );
 
+const { handleWalletTerminalMarketRoute } = await import(
+  "./src/routes/wallet-terminal-market-route.ts"
+);
+const { handleWalletTerminalTokenSafetyRoute } = await import(
+  "./src/routes/wallet-terminal-token-safety-route.ts"
+);
+
 export default defineConfig({
   root: path.resolve(pluginRoot, "src/ui/__e2e__"),
   define: {
     "process.env": "({})",
   },
-  plugins: [tailwindcss(), react()],
+  plugins: [
+    tailwindcss(),
+    react(),
+    {
+      name: "wallet-terminal-market-route",
+      configureServer(server) {
+        server.middlewares.use((req, res, next) => {
+          handleWalletTerminalMarketRoute(req, res)
+            .then(
+              (handled) =>
+                handled || handleWalletTerminalTokenSafetyRoute(req, res),
+            )
+            .then(
+              (handled) => {
+                if (!handled) next();
+              },
+              (error: unknown) => next(error),
+            );
+        });
+      },
+    },
+  ],
   resolve: {
     dedupe: ["react", "react-dom"],
     alias: [

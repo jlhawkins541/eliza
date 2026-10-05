@@ -19,10 +19,11 @@ Adds a unified wallet action+provider surface to an Eliza agent, replacing the p
 | `WALLET` | `pump_fun_buy` | Buy a pump.fun token on Solana via PumpPortal trade-local, local signing, browser coin-page open, and Solana RPC submission. |
 | `WALLET` | `token_info` | Read-only token/market data (DexScreener, Birdeye, CoinGecko). |
 | `WALLET` | `search_address` | Birdeye wallet/portfolio lookup by address. |
+| `WALLET` | `token_safety` | Read-only GoPlus rug-risk check of one Solana mint (authorities, Token-2022 extensions, holder concentration, liquidity) with an avoid/caution/no-major-flags verdict. |
 | `WALLET` | `onchain_token_safety` | Read-only on-chain Solana mint safety check from `SOLANA_RPC_URL` only (no API key, no signing; PROVIDER_UNAVAILABLE when unset): token program, supply, mint/freeze authority, Token-2022 risk extensions decoded, other extensions by name, largest token accounts' share of supply (accounts, not owners; RPC returns ≤20). A check that could not run reads UNKNOWN, never a pass. Dispatched before `runWalletRouter`; never reaches `WalletBackend`, SolanaService key paths or the confirmation gate. |
 | `TRADE` | `inspect_account`, `inspect_session`, `submit_order` | Governed Steward trading account/session inspection and confirmed order intent for Hyperliquid and Polymarket. |
 
-Similes handled: `SWAP`, `SWAP_SOLANA`, `TRANSFER`, `TRANSFER_TOKEN`, `WALLET_SWAP`, `WALLET_TRANSFER`, `CROSS_CHAIN_TRANSFER`, `PREPARE_TRANSFER`, `WALLET_ACTION`, `WALLET_GOV`, `PUMP_FUN_BUY`, `PUMPFUN_BUY`, `TOKEN_INFO`, `BIRDEYE_LOOKUP`, `BIRDEYE_SEARCH`, `WALLET_SEARCH_ADDRESS`, plus `TOKEN_SECURITY` (owned by the promoted `WALLET_ONCHAIN_TOKEN_SAFETY` virtual, whose automatic simile is `ONCHAIN_TOKEN_SAFETY`). The parent also routes `action=TOKEN_SECURITY` to `onchain_token_safety`. `TOKEN_SAFETY` and `CHECK_TOKEN_SAFETY` are deliberately never claimed: the third-party plugin-x402-finance registers an action named `CHECK_TOKEN_SAFETY` with simile `TOKEN_SAFETY` for its EVM honeypot check, and a wallet claim would route those calls to this Solana-only check.
+Similes handled: `SWAP`, `SWAP_SOLANA`, `TRANSFER`, `TRANSFER_TOKEN`, `WALLET_SWAP`, `WALLET_TRANSFER`, `CROSS_CHAIN_TRANSFER`, `PREPARE_TRANSFER`, `WALLET_ACTION`, `WALLET_GOV`, `PUMP_FUN_BUY`, `PUMPFUN_BUY`, `TOKEN_INFO`, `BIRDEYE_LOOKUP`, `BIRDEYE_SEARCH`, `WALLET_SEARCH_ADDRESS`, plus `TOKEN_SECURITY` (owned by the promoted `WALLET_ONCHAIN_TOKEN_SAFETY` virtual, whose automatic simile is `ONCHAIN_TOKEN_SAFETY`). The parent also routes `action=TOKEN_SECURITY` to `onchain_token_safety`. The on-chain virtual deliberately claims neither `TOKEN_SAFETY` nor `CHECK_TOKEN_SAFETY`: the third-party plugin-x402-finance registers an action named `CHECK_TOKEN_SAFETY` with simile `TOKEN_SAFETY` for its EVM honeypot check. Note that promotion gives the GoPlus `token_safety` subaction's virtual (`WALLET_TOKEN_SAFETY`) the automatic simile `TOKEN_SAFETY`, so that name is shared with plugin-x402-finance when both plugins are loaded.
 
 All on-chain subactions (`transfer`, `swap`, `bridge`, `gov`, `pump_fun_buy`) require a user confirmation turn before execution. `mode=prepare` (default) stages without signing. Setting `mode=execute` does **not** bypass the gate — submission only happens after a confirmed reply turn. `dryRun=true` returns metadata without signing. `mode=simulate` (GH #16613) is a third, non-broadcasting mode: the handler builds the real transaction (real Jupiter quote/swap-tx or real PumpPortal trade-local build, whichever the subaction uses) and runs `connection.simulateTransaction({ sigVerify: false, replaceRecentBlockhash: true })` against it instead of signing and sending. It needs only the wallet's public key — never a private key or a `WalletBackend` signer — so it cannot authorize or lead to a live submission, and it skips the confirmation gate entirely (`requiresWalletFinancialConfirmation` returns `false` for it, same as `dryRun`). An RPC-reported revert is a *typed, successful* simulation (`success: false` with `err`/`logs`), never a thrown error or a fabricated success. Supported today for Solana `swap` and `pump_fun_buy` only; every other handler/subaction combination returns a typed `SIMULATION_UNSUPPORTED` router failure rather than silently falling back to `execute()` or the `prepare` echo.
 
@@ -112,6 +113,8 @@ plugins/plugin-wallet/
       birdeye/                 BirdeyeService, market/trending/portfolio providers
       dexscreener/             DexScreenerService
       token-info/              TokenInfoService (multi-provider dispatcher)
+      goplus/                  GoPlus Solana token security client + WALLET token_safety handler
+                               (shared with the terminal's token safety route)
       token-safety/            On-chain Solana mint safety check (WALLET onchain_token_safety)
       lpinfo/                  kaminoPlugin, lpinfoPlugin, steerPlugin re-exports
       news/                    defiNewsPlugin, NewsDataService
@@ -134,6 +137,10 @@ plugins/plugin-wallet/
       wallet-routes.ts         handleWalletRoutes — mounted by @elizaos/agent HTTP server
     routes/
       plugin.ts                Additional plugin route exports
+      wallet-terminal-market-route.ts  Public read-only CoinGecko market list and
+                               price history for the crypto terminal
+      wallet-terminal-token-safety-route.ts  Public read-only GoPlus Solana token
+                               safety report (checks + avoid/caution verdict)
     types/
       wallet-router.ts         WalletRouterParams, WalletRouterResult, WalletChainHandler interface
     register.ts                Renderer boot side-effect entry (elizaos.appRegister:"register");
@@ -147,6 +154,11 @@ plugins/plugin-wallet/
       register-routes.ts       registerAppRoutePluginLoader + registerAppShellPage +
                                registerBuiltinWidgets (must run once at boot)
       InventoryView.tsx        GUI wallet view (Escape wrapper around InventoryAppView)
+      CryptoTerminalView.tsx   /crypto terminal: live markets, watchlist, charts, paper
+                               orders, paper portfolio, price alerts, token safety,
+                               HUNT/SLEEP/OFF mode, and the wallet dashboard tab
+      terminal/                Paper ledger, operating mode, and price alerts (pure),
+                               terminal data hooks, price chart
       InventoryView.interact.ts  `interact` view capability handler
       wallet-view-bundle.ts    Entry for the standalone Vite view bundle (dist/views/bundle.js)
       components/              InventoryAppView DOM dashboard
@@ -241,6 +253,7 @@ Extend `src/analytics/birdeye/service.ts`. The service proxies all calls through
 - **Auto-enable.** `auto-enable.ts` must remain a lightweight env-read module with no transitive plugin imports. The auto-enable engine loads it on every agent boot.
 - **UI surface is subpath-only.** The package root (`.`) is the server barrel and must never import `src/ui/**`. Hosts import `@elizaos/plugin-wallet/ui` (components/barrel) or rely on the manifest-driven renderer boot (`elizaos.appRegister: "register"` → `src/register.ts`). `src/ui/register-routes.ts` must execute exactly once; duplicate imports create duplicate shell pages.
 - **`walletAppPlugin` naming.** The UI descriptor is named `@elizaos/plugin-wallet:ui` with `packageName: "@elizaos/plugin-wallet"` so the views registry resolves the package dir while the app-route loader id stays distinct from the runtime `wallet` plugin. `normalizeAppRoutePluginId` strips `:ui`, so `ELIZA_SKIP_APP_ROUTE_PLUGINS=wallet` skips it.
+- **Crypto terminal is paper-only.** `CryptoTerminalView` prices orders from the live `/api/wallet/terminal/*` routes but applies them only to the local `terminal/paper-ledger.ts` state persisted under `eliza:wallet:paper-terminal:v1`. It must never sign, call `WalletBackend`, or route through the `WALLET`/`TRADE` actions; real execution belongs behind the financial confirmation gate. Its HUNT / SLEEP / OFF mode (`terminal/operating-mode.ts`, default SLEEP, persisted under `eliza:wallet:terminal-mode:v1`) changes only after a confirm dialog and records each change; OFF must make no automatic market request, and HUNT's scout only ranks movers for review. Price alerts (`terminal/price-alerts.ts`, persisted under `eliza:wallet:terminal-alerts:v1`) are one-shot in-terminal notices checked against live prices in HUNT and SLEEP and paused in OFF. No mode or alert may place, sign, or submit an order.
 - **View bundle.** `dist/views/bundle.js` is built by `vite.config.views.ts` (entry `src/ui/wallet-view-bundle.ts`, export `InventoryView`), not by the Node build. Both must run for a complete dist.
 
 ## Verification
