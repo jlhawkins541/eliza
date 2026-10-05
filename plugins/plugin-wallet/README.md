@@ -25,6 +25,7 @@ All write operations default to `mode=prepare` (stages the transaction but does 
 | `token_info` | Token and market data from DexScreener, Birdeye, or CoinGecko. |
 | `search_address` | Birdeye wallet portfolio lookup by address. |
 | `token_safety` | GoPlus rug-risk check of a Solana mint with an avoid/caution/no-major-flags verdict (read-only). |
+| `token_pairs` | DexScreener pools for a Solana mint: price, liquidity, 24h volume and pool age (read-only, no key). Thin liquidity or a pool under a day old adds caution and never clears a GoPlus flag. |
 | `social_signal` | LunarCrush Galaxy Score, AltRank and sentiment for a ticker (read-only, needs `LUNARCRUSH_API_KEY`). A low score adds caution and never clears a GoPlus flag. |
 
 ### LP management

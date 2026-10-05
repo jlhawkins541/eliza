@@ -37,13 +37,16 @@ import type {
   WalletTerminalTradeStatusResponse,
   WalletTokenSafetyVerdict,
 } from "../../contracts.ts";
+import { LiquidityRow } from "./LiquidityRow.tsx";
 import { SocialSignalRow } from "./SocialSignalRow.tsx";
 import {
   type RealTradingHandle,
   type SocialSignalState,
+  type TokenPairsState,
   type TokenSafetyState,
   useRealTrading,
   useSocialSignal,
+  useTokenPairs,
   useTokenSafety,
 } from "./terminal-data.ts";
 
@@ -199,6 +202,7 @@ function ReviewDialog({
   review,
   safety,
   social,
+  pairs,
   sending,
   result,
   error,
@@ -209,6 +213,7 @@ function ReviewDialog({
   review: WalletTerminalTradeReview;
   safety: TokenSafetyState | null;
   social: SocialSignalState;
+  pairs: TokenPairsState;
   sending: boolean;
   result: WalletTerminalTradeExecuteResponse | null;
   error: string | null;
@@ -295,6 +300,18 @@ function ReviewDialog({
               </details>
             ) : null}
             {safety ? <SafetyLine state={safety} /> : null}
+            {safety ? (
+              <LiquidityRow
+                state={pairs}
+                mint={
+                  safety.status === "ready"
+                    ? safety.data.mint
+                    : safety.status === "error"
+                      ? null
+                      : ""
+                }
+              />
+            ) : null}
             {safety ? (
               <SocialSignalRow
                 state={social}
@@ -447,12 +464,19 @@ function TradeTicket({
     useState<WalletTerminalTradeExecuteResponse | null>(null);
   const { state: safety, check } = useTokenSafety();
   const social = useSocialSignal();
+  const pairs = useTokenPairs();
   const safetySymbol = safety.status === "ready" ? safety.data.symbol : null;
   const { check: checkSocial, clear: clearSocial } = social;
   useEffect(() => {
     if (safetySymbol !== null) checkSocial(safetySymbol);
     else clearSocial();
   }, [safetySymbol, checkSocial, clearSocial]);
+  const safetyMintChecked = safety.status === "ready" ? safety.data.mint : null;
+  const { check: checkPairs, clear: clearPairs } = pairs;
+  useEffect(() => {
+    if (safetyMintChecked !== null) checkPairs(safetyMintChecked);
+    else clearPairs();
+  }, [safetyMintChecked, checkPairs, clearPairs]);
   const [safetyMint, setSafetyMint] = useState<string | null>(null);
   const mintId = useId();
   const amountId = useId();
@@ -591,6 +615,7 @@ function TradeTicket({
           review={review}
           safety={safetyMint ? safety : null}
           social={social.state}
+          pairs={pairs.state}
           sending={sending}
           result={result}
           error={sendError}

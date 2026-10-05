@@ -51,6 +51,7 @@ import {
   formatTerminalUnits,
   formatTerminalUsd,
 } from "./terminal/format.ts";
+import { LiquidityRow } from "./terminal/LiquidityRow.tsx";
 import {
   OPERATING_MODES,
   type OperatingModeChange,
@@ -93,6 +94,7 @@ import {
   useSocialSignal,
   useTerminalChart,
   useTerminalMarkets,
+  useTokenPairs,
   useTokenSafety,
   useWatchlist,
 } from "./terminal/terminal-data.ts";
@@ -365,12 +367,27 @@ const VERDICT_COPY: Record<
   },
 };
 
-/** GoPlus's verdict, raised to caution when the social signal adds one. */
+/**
+ * GoPlus's verdict, raised to caution when the social signal or the token's
+ * liquidity adds one. Neither may lower a verdict GoPlus already gave.
+ */
 function shownVerdict(
   verdict: WalletTokenSafetyVerdict,
-  socialCaution: boolean,
+  addedCaution: boolean,
 ): WalletTokenSafetyVerdict {
-  return socialCaution && verdict === "no-major-flags" ? "caution" : verdict;
+  return addedCaution && verdict === "no-major-flags" ? "caution" : verdict;
+}
+
+/** Why a "no major flags" verdict is shown as caution. */
+function raisedVerdictDetail(
+  socialCaution: boolean,
+  liquidityCaution: boolean,
+): string {
+  const reasons: string[] = [];
+  if (liquidityCaution)
+    reasons.push("DexScreener shows thin or very new liquidity");
+  if (socialCaution) reasons.push("LunarCrush shows weak social activity");
+  return `GoPlus found no major flags, but ${reasons.join(" and ")}.`;
 }
 
 const SEVERITY_TONE: Record<WalletTokenSafetySeverity, string> = {
@@ -394,6 +411,7 @@ function TokenSafetyPanel({ onTrade }: { onTrade: (mint: string) => void }) {
   const [touched, setTouched] = useState(false);
   const { state, check } = useTokenSafety();
   const social = useSocialSignal();
+  const pairs = useTokenPairs();
   const reportMint = state.status === "ready" ? state.data.mint : null;
   const reportSymbol = state.status === "ready" ? state.data.symbol : null;
   const { check: checkSocial, clear: clearSocial } = social;
@@ -401,11 +419,22 @@ function TokenSafetyPanel({ onTrade }: { onTrade: (mint: string) => void }) {
     if (reportMint !== null && reportSymbol !== null) checkSocial(reportSymbol);
     else clearSocial();
   }, [reportMint, reportSymbol, checkSocial, clearSocial]);
+  const { check: checkPairs, clear: clearPairs } = pairs;
+  useEffect(() => {
+    if (reportMint !== null) checkPairs(reportMint);
+    else clearPairs();
+  }, [reportMint, checkPairs, clearPairs]);
   // A low Galaxy Score can raise "no major flags" to caution, never lower a verdict.
   const socialCaution =
     social.state.status === "ready" &&
     social.state.data.status === "tracked" &&
     social.state.data.addsCaution;
+  // Thin or day-old liquidity raises it the same way, and never lowers it.
+  const liquidityCaution =
+    pairs.state.status === "ready" &&
+    pairs.state.data.status === "found" &&
+    pairs.state.data.addsCaution;
+  const addedCaution = socialCaution || liquidityCaution;
   const inputId = useId();
   const trimmed = mint.trim();
   const valid = SOLANA_MINT_PATTERN.test(trimmed);
@@ -467,22 +496,21 @@ function TokenSafetyPanel({ onTrade }: { onTrade: (mint: string) => void }) {
           <div
             className={cn(
               "rounded-md border px-4 py-3",
-              VERDICT_COPY[shownVerdict(state.data.verdict, socialCaution)]
-                .tone,
+              VERDICT_COPY[shownVerdict(state.data.verdict, addedCaution)].tone,
             )}
             data-testid="token-safety-verdict"
           >
             <h2 id="token-safety-title" className="text-base font-semibold">
               {
-                VERDICT_COPY[shownVerdict(state.data.verdict, socialCaution)]
+                VERDICT_COPY[shownVerdict(state.data.verdict, addedCaution)]
                   .label
               }
               {state.data.symbol ? ` · ${state.data.symbol}` : ""}
             </h2>
             <p className="text-xs text-txt">
-              {shownVerdict(state.data.verdict, socialCaution) !==
+              {shownVerdict(state.data.verdict, addedCaution) !==
               state.data.verdict
-                ? "GoPlus found no major flags, but LunarCrush shows weak social activity."
+                ? raisedVerdictDetail(socialCaution, liquidityCaution)
                 : VERDICT_COPY[state.data.verdict].detail}
             </p>
           </div>
@@ -509,6 +537,7 @@ function TokenSafetyPanel({ onTrade }: { onTrade: (mint: string) => void }) {
               </li>
             ))}
           </ul>
+          <LiquidityRow state={pairs.state} mint={reportMint} />
           <SocialSignalRow state={social.state} symbol={reportSymbol} />
           <p
             className={cn(

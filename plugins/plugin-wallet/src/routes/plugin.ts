@@ -15,6 +15,7 @@ import type http from "node:http";
 import type { Plugin, Route } from "@elizaos/core";
 import { handleWalletMarketOverviewRoute } from "./wallet-market-overview-route";
 import { handleWalletTerminalMarketRoute } from "./wallet-terminal-market-route";
+import { handleWalletTerminalPairsRoute } from "./wallet-terminal-pairs-route";
 import {
   handleWalletTerminalSocialRoute,
   type SocialRouteSettings,
@@ -37,6 +38,17 @@ async function terminalMarketHandler(
   _runtime: unknown,
 ): Promise<void> {
   await handleWalletTerminalMarketRoute(
+    req as http.IncomingMessage,
+    res as http.ServerResponse,
+  );
+}
+
+async function terminalPairsHandler(
+  req: unknown,
+  res: unknown,
+  _runtime: unknown,
+): Promise<void> {
+  await handleWalletTerminalPairsRoute(
     req as http.IncomingMessage,
     res as http.ServerResponse,
   );
@@ -112,6 +124,18 @@ const walletHttpRoutes: Route[] = [
     publicReason:
       "Token safety is cached public GoPlus data about a mint with no account state.",
     handler: terminalTokenSafetyHandler,
+  },
+  // GET /api/wallet/terminal/pairs — read-only DexScreener liquidity for one
+  // Solana mint.
+  {
+    type: "GET",
+    path: "/api/wallet/terminal/pairs",
+    rawPath: true,
+    public: true,
+    name: "wallet-terminal-pairs",
+    publicReason:
+      "Terminal liquidity is cached public DexScreener data about a mint with no account state.",
+    handler: terminalPairsHandler,
   },
   // GET /api/wallet/terminal/social — read-only LunarCrush social signal for
   // one ticker. Authenticated: each uncached lookup spends the agent's key.

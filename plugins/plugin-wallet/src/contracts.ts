@@ -212,6 +212,75 @@ export type WalletTerminalSocialSignalResponse =
       source: WalletSocialSignalSource;
     } & WalletSocialSignalScores);
 
+/** Where the terminal's liquidity numbers come from. */
+export interface WalletTokenPairsSource {
+  providerId: "dexscreener";
+  providerName: "DexScreener";
+  providerUrl: string;
+  /** True when a refresh failed and an earlier answer is served instead. */
+  stale: boolean;
+  error: string | null;
+}
+
+/** One trading pair for a mint; null means DexScreener didn't report it. */
+export interface WalletTokenPair {
+  pairAddress: string;
+  /** The DEX the pool is on, such as `raydium` or `meteora`. */
+  dexId: string | null;
+  /** DexScreener's page for the pair. */
+  url: string | null;
+  baseSymbol: string | null;
+  baseName: string | null;
+  baseAddress: string | null;
+  quoteSymbol: string | null;
+  /** Price of the base token in USD, as DexScreener's decimal string. */
+  priceUsd: string | null;
+  priceChange24hPct: number | null;
+  liquidityUsd: number | null;
+  volume24hUsd: number | null;
+  /** Fully diluted valuation in USD. */
+  fdvUsd: number | null;
+  /** ISO time the pool was created. */
+  pairCreatedAt: string | null;
+}
+
+/**
+ * Response from GET /api/wallet/terminal/pairs and the WALLET `token_pairs`
+ * result. Read-only liquidity context that never changes the GoPlus verdict:
+ * `no-pairs` means DexScreener knows no pool for the mint, which is not a zero
+ * price and not a safe token.
+ */
+export type WalletTerminalTokenPairsResponse =
+  | {
+      status: "no-pairs";
+      mint: string;
+      checkedAt: string;
+      stale: boolean;
+      source: WalletTokenPairsSource;
+    }
+  | {
+      status: "found";
+      mint: string;
+      checkedAt: string;
+      stale: boolean;
+      source: WalletTokenPairsSource;
+      /** The strongest pairs by liquidity, deepest first. */
+      pairs: WalletTokenPair[];
+      /** How many pairs DexScreener reported, before the list was trimmed. */
+      pairCount: number;
+      totalLiquidityUsd: number;
+      totalVolume24hUsd: number;
+      /** ISO time the earliest pool was created. */
+      oldestPairCreatedAt: string | null;
+      thinLiquidity: boolean;
+      newPool: boolean;
+      /**
+       * True when thin liquidity or a new pool warrants a caution beside the
+       * GoPlus verdict. It never clears or replaces that verdict.
+       */
+      addsCaution: boolean;
+    };
+
 /** A terminal real trade spends SOL for a token (buy) or the reverse (sell). */
 export type WalletTerminalTradeSide = "buy" | "sell";
 

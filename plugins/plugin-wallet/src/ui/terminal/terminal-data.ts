@@ -21,6 +21,7 @@ import type {
   WalletTerminalChartResponse,
   WalletTerminalMarketsResponse,
   WalletTerminalSocialSignalResponse,
+  WalletTerminalTokenPairsResponse,
   WalletTerminalTokenSafetyResponse,
   WalletTerminalTradeExecuteResponse,
   WalletTerminalTradeReview,
@@ -376,6 +377,55 @@ export function useSocialSignal(): {
         // error-policy:J4 the Social row renders a distinct unavailable state.
         if (mounted.current && latest.current === symbol)
           setState({ status: "error", symbol, message: describeError(error) });
+      });
+  }, []);
+
+  const clear = useCallback(() => {
+    latest.current = null;
+    setState({ status: "idle" });
+  }, []);
+
+  return { state, check, clear };
+}
+
+export type TokenPairsState =
+  | { status: "idle" }
+  | { status: "loading"; mint: string }
+  | { status: "error"; mint: string; message: string }
+  | { status: "ready"; data: WalletTerminalTokenPairsResponse };
+
+/** On-demand DexScreener liquidity for one Solana mint. */
+export function useTokenPairs(): {
+  state: TokenPairsState;
+  check: (mint: string) => void;
+  clear: () => void;
+} {
+  const [state, setState] = useState<TokenPairsState>({ status: "idle" });
+  const latest = useRef<string | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  const check = useCallback((mint: string) => {
+    latest.current = mint;
+    setState({ status: "loading", mint });
+    const query = new URLSearchParams({ mint });
+    client
+      .fetch<WalletTerminalTokenPairsResponse>(
+        `/api/wallet/terminal/pairs?${query.toString()}`,
+      )
+      .then((data) => {
+        if (mounted.current && latest.current === mint)
+          setState({ status: "ready", data });
+      })
+      .catch((error: unknown) => {
+        // error-policy:J4 the Liquidity row renders a distinct unavailable state.
+        if (mounted.current && latest.current === mint)
+          setState({ status: "error", mint, message: describeError(error) });
       });
   }, []);
 

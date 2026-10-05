@@ -11,7 +11,8 @@
  * unlock, idle auto-lock, forgot-PIN reset), the GoPlus token safety
  * check (served by the real token safety route over a recorded payload), the
  * LunarCrush Social row (the real social route over a sample payload, with
- * and without a key), and
+ * and without a key), the DexScreener Liquidity row (the real pairs route over
+ * a sample payload, including the thin-liquidity caution), and
  * the Real trade tab, served by the real wallet trade routes with Jupiter and
  * Solana RPC doubles and a real signer over a generated key; the agent's
  * trade-permission route is the one stand-in there.
@@ -40,6 +41,11 @@ import {
   __setWalletTerminalFetchForTests,
   handleWalletTerminalMarketRoute,
 } from "../routes/wallet-terminal-market-route";
+import {
+  __resetWalletTerminalPairsRouteForTests,
+  __setWalletTerminalPairsFetchForTests,
+  handleWalletTerminalPairsRoute,
+} from "../routes/wallet-terminal-pairs-route";
 import {
   __resetWalletTerminalSocialRouteForTests,
   __setWalletTerminalSocialFetchForTests,
@@ -176,7 +182,19 @@ const lunarcrush = JSON.parse(
   ),
 ) as { lunarcrush: { data: Record<string, unknown> } };
 
+const dexscreener = JSON.parse(
+  readFileSync(
+    resolve(
+      import.meta.dirname,
+      "../routes/__fixtures__/dexscreener-token-pairs.sample.json",
+    ),
+    "utf8",
+  ),
+) as { mint: string; dexscreener: Array<Record<string, unknown>> };
+
 let upstreamDown = false;
+/** DexScreener's answer for any mint in this file. */
+let pairsPayload: unknown = dexscreener.dexscreener;
 /** LUNARCRUSH_API_KEY the social route sees; null leaves it unset. */
 let socialKey: string | null = null;
 let galaxyScore = 62;
@@ -242,7 +260,13 @@ async function viaRoute(path: string, init?: RequestInit): Promise<unknown> {
       req,
       res as unknown as http.ServerResponse,
     ));
-  if (!served) {
+  const servedPairs =
+    served ||
+    (await handleWalletTerminalPairsRoute(
+      req,
+      res as unknown as http.ServerResponse,
+    ));
+  if (!servedPairs) {
     await handleWalletTerminalSocialRoute(
       req,
       res as unknown as http.ServerResponse,
@@ -263,6 +287,8 @@ beforeEach(() => {
   upstreamDown = false;
   socialKey = null;
   galaxyScore = 62;
+  pairsPayload = dexscreener.dexscreener;
+  __setWalletTerminalPairsFetchForTests(async () => jsonResponse(pairsPayload));
   __setWalletTerminalSocialFetchForTests(async () =>
     jsonResponse({
       ...lunarcrush.lunarcrush,
@@ -322,6 +348,7 @@ afterEach(() => {
   __resetWalletTerminalMarketRouteForTests();
   __resetWalletTerminalTokenSafetyRouteForTests();
   __resetWalletTerminalSocialRouteForTests();
+  __resetWalletTerminalPairsRouteForTests();
 });
 
 async function openBitcoin() {
@@ -538,6 +565,76 @@ describe("CryptoTerminalView", () => {
       "Social: Add a LunarCrush key (LUNARCRUSH_API_KEY) to see social data.",
     );
     expect(routeCalls).toContain("/api/wallet/terminal/social?symbol=Bonk");
+    expect((await screen.findByText(/across 2 pools/)).textContent).toBe(
+      "Liquidity: $5.02M across 2 pools · $6.70M 24h volume · " +
+        `${Math.round((Date.now() - Date.parse("2023-01-01T00:00:00.000Z")) / 86_400_000)} d old · deepest on raydium vs SOL`,
+    );
+    expect(screen.queryByTestId("liquidity-row-caution")).toBeNull();
+    expect(routeCalls).toContain(
+      `/api/wallet/terminal/pairs?mint=${goplus.mint}`,
+    );
+  });
+
+  it("raises no major flags to caution for thin liquidity and says why", async () => {
+    const clean = goplus.goplus as {
+      result: Record<string, Record<string, unknown>>;
+    };
+    __setWalletTerminalTokenSafetyFetchForTests(async () =>
+      jsonResponse({
+        ...clean,
+        result: {
+          [goplus.mint]: {
+            ...clean.result[goplus.mint],
+            metadata_mutable: { status: "0" },
+            holders: [{ percent: "0.05" }],
+          },
+        },
+      }),
+    );
+    pairsPayload = [
+      { ...dexscreener.dexscreener[0], liquidity: { usd: 3_000 } },
+    ];
+    render(<CryptoTerminalView />);
+    fireEvent.click(screen.getByRole("button", { name: "Token safety" }));
+    fireEvent.change(screen.getByTestId("token-safety-mint"), {
+      target: { value: goplus.mint },
+    });
+    fireEvent.click(screen.getByTestId("token-safety-check"));
+    const caution = await screen.findByTestId("liquidity-row-caution");
+    expect(caution.textContent).toBe(
+      "Caution: liquidity is thin, so a trade will move the price. This adds caution and never clears a GoPlus flag.",
+    );
+    const verdict = screen.getByTestId("token-safety-verdict").textContent;
+    expect(verdict).toContain("Caution · Bonk");
+    expect(verdict).toContain(
+      "GoPlus found no major flags, but DexScreener shows thin or very new liquidity.",
+    );
+  });
+
+  it("shows a mint with no pool and an unavailable DexScreener as their own states", async () => {
+    pairsPayload = [];
+    render(<CryptoTerminalView />);
+    fireEvent.click(screen.getByRole("button", { name: "Token safety" }));
+    fireEvent.change(screen.getByTestId("token-safety-mint"), {
+      target: { value: goplus.mint },
+    });
+    fireEvent.click(screen.getByTestId("token-safety-check"));
+    expect(
+      (await screen.findByText(/No pool on DexScreener/)).textContent,
+    ).toBe("Liquidity: No pool on DexScreener. Treat it as untradeable.");
+
+    cleanup();
+    __resetWalletTerminalPairsRouteForTests();
+    __setWalletTerminalPairsFetchForTests(async () => jsonResponse({}, 500));
+    render(<CryptoTerminalView />);
+    fireEvent.click(screen.getByRole("button", { name: "Token safety" }));
+    fireEvent.change(screen.getByTestId("token-safety-mint"), {
+      target: { value: goplus.mint },
+    });
+    fireEvent.click(screen.getByTestId("token-safety-check"));
+    expect(
+      (await screen.findByText(/Unavailable: DexScreener/)).textContent,
+    ).toBe("Liquidity: Unavailable: DexScreener returned HTTP 500");
   });
 
   it("shows the LunarCrush Social row, and a low score raises no major flags to caution", async () => {
