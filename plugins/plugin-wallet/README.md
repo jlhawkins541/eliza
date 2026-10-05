@@ -44,6 +44,31 @@ Access via the `lpManagerPlugin` export; LP actions are surfaced as the `LIQUIDI
 - **Token info:** multi-provider dispatcher (DexScreener, Birdeye, CoinGecko).
 - **DeFi news:** via `defiNewsPlugin`.
 
+## Terminal MCP server
+
+`bun run --cwd plugins/plugin-wallet mcp` serves the crypto terminal's research
+tools over MCP (stdio) so a client such as Claude Desktop can use them while the
+agent is running: `terminal_markets`, `terminal_chart`, `token_safety`,
+`token_pairs`, `social_signal` and `trade_status`. Every tool is a read-only GET
+against the running agent's `/api/wallet/terminal/*` routes; none can review,
+sign or send a trade, which stays a person's tap in the terminal.
+
+It reads `packages/agent/.env`, sends the agent's `ELIZA_API_TOKEN` as a bearer
+header, and talks to the local agent port unless `ELIZA_TERMINAL_MCP_URL` names
+another origin. It needs the optional `@modelcontextprotocol/sdk` dependency.
+A Claude Desktop entry looks like:
+
+```json
+{
+  "mcpServers": {
+    "elizaos-terminal": {
+      "command": "bun",
+      "args": ["run", "--cwd", "/path/to/eliza/plugins/plugin-wallet", "mcp"]
+    }
+  }
+}
+```
+
 ## Wallet backends
 
 The plugin supports two signing backends, selected by `ELIZA_WALLET_BACKEND`:
@@ -71,6 +96,7 @@ Additional optional variables:
 | `BIRDEYE_API_KEY` | Direct Birdeye access (falls back to Eliza Cloud route) |
 | `BIRDEYE_WALLET_ADDR` | Enables portfolio provider for a specific address |
 | `BIRDEYE_NO_TRENDING` | Disable trending provider |
+| `ELIZA_TERMINAL_MCP_URL` | Agent origin the terminal MCP server reads from; defaults to the local agent port |
 | `LUNARCRUSH_API_KEY` | LunarCrush key for the terminal's Social row and `social_signal`; kept on the server |
 | `ELIZA_AGENT_WALLET_AUTO_ENABLE` | Set to `0` to disable auto-enable |
 | `PUMPFUN_TRADE_LOCAL_URL` | Override PumpPortal local transaction API; default `https://pumpportal.fun/api/trade-local` |
