@@ -281,6 +281,111 @@ export type WalletTerminalTokenPairsResponse =
       addsCaution: boolean;
     };
 
+/** Exchanges the terminal places spot limit orders on with the agent's API keys. */
+export type WalletExchangeVenue = "kraken" | "okx";
+export type WalletExchangeBase = "SOL" | "USDC" | "USDT" | "PYUSD";
+export type WalletExchangeQuote = "USD" | "USDT" | "USDC";
+
+/** Response from GET /api/wallet/terminal/exchange/status. Never returns keys. */
+export interface WalletTerminalExchangeStatusResponse {
+  tradePermissionMode: TradePermissionMode;
+  /** True when the permission mode lets a person place real orders. */
+  realTradingEnabled: boolean;
+  /** Each venue, and the settings it still needs before it can be used. */
+  venues: Record<
+    WalletExchangeVenue,
+    { configured: boolean; missingSettings: string[] }
+  >;
+  bases: WalletExchangeBase[];
+  quotes: WalletExchangeQuote[];
+  /** Largest order value allowed, in the quote currency (USD or a USD stablecoin). */
+  maxOrderUsd: number;
+  /** How long a review can be confirmed, in seconds. */
+  reviewSeconds: number;
+}
+
+/** Body of POST /api/wallet/terminal/exchange/review. */
+export interface WalletTerminalExchangeReviewRequest {
+  venue: WalletExchangeVenue;
+  base: WalletExchangeBase;
+  quote: WalletExchangeQuote;
+  side: WalletTerminalTradeSide;
+  /** Base currency amount, as a decimal string. */
+  quantity: string;
+  /** Limit price in the quote currency, as a decimal string. */
+  price: string;
+}
+
+/** One thing the venue confirmed about the order before it can be placed. */
+export interface WalletExchangeReviewCheck {
+  label: string;
+  detail: string;
+}
+
+/** Response from POST /api/wallet/terminal/exchange/review. */
+export interface WalletTerminalExchangeReview {
+  reviewId: string;
+  /** ISO time after which the review can no longer be confirmed. */
+  expiresAt: string;
+  venue: WalletExchangeVenue;
+  /** The venue's own market name, such as `SOLUSD` or `SOL-USD`. */
+  market: string;
+  base: WalletExchangeBase;
+  quote: WalletExchangeQuote;
+  side: WalletTerminalTradeSide;
+  orderType: "limit";
+  quantity: string;
+  price: string;
+  /** quantity × price, in the quote currency. */
+  orderValue: string;
+  /** What the venue confirmed: validation, market rules, and available funds. */
+  checks: WalletExchangeReviewCheck[];
+  /** The id the venue will see on this order, so it can be found if a send is lost. */
+  clientOrderId: string;
+}
+
+/** Body of POST /api/wallet/terminal/exchange/execute. */
+export interface WalletTerminalExchangeExecuteRequest {
+  reviewId: string;
+  confirm: true;
+}
+
+/** Where an exchange order the terminal placed stands, as last seen. */
+export type WalletExchangeOrderState =
+  | "submitted"
+  | "open"
+  | "partially-filled"
+  | "filled"
+  | "canceled"
+  | "rejected"
+  | "unknown";
+
+/**
+ * An exchange order placed from the terminal. `unknown` means the send's
+ * outcome was not seen; check the venue before placing another order.
+ */
+export interface WalletExchangeOrder {
+  clientOrderId: string;
+  /** The venue's order id, once it has reported one. */
+  orderId: string | null;
+  venue: WalletExchangeVenue;
+  market: string;
+  side: WalletTerminalTradeSide;
+  quantity: string;
+  price: string;
+  state: WalletExchangeOrderState;
+  /** Base amount filled so far, when the venue reported it. */
+  filledQuantity: string | null;
+  detail: string;
+  placedAt: string;
+  checkedAt: string;
+}
+
+/** Response from GET /api/wallet/terminal/exchange/orders, newest first. */
+export interface WalletTerminalExchangeOrdersResponse {
+  orders: WalletExchangeOrder[];
+}
+
 /** A terminal real trade spends SOL for a token (buy) or the reverse (sell). */
 export type WalletTerminalTradeSide = "buy" | "sell";
 

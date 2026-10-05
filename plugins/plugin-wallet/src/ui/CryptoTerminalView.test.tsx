@@ -31,9 +31,14 @@ import {
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  createTerminalExchangeHarness,
+  type TerminalExchangeHarness,
+} from "../api/__tests__/terminal-exchange-harness";
+import {
   createTerminalTradeHarness,
   type TerminalTradeHarness,
 } from "../api/__tests__/terminal-trade-harness";
+import { __resetTerminalExchangeForTests } from "../api/terminal-exchange";
 import { __resetTerminalTradesForTests } from "../api/terminal-trade";
 import {
   __expireWalletTerminalCachesForTests,
@@ -209,6 +214,28 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 let trade: TerminalTradeHarness | null = null;
+let exchange: TerminalExchangeHarness | null = null;
+
+// Exchange calls go through the real wallet routes in the exchange harness,
+// sharing the trade harness's permission config.
+async function viaExchangeRoute(path: string, init?: RequestInit) {
+  if (!trade) throw new Error(`no trade harness for ${path}`);
+  exchange ??= createTerminalExchangeHarness({ config: trade.config });
+  const body =
+    typeof init?.body === "string"
+      ? (JSON.parse(init.body) as Record<string, unknown>)
+      : undefined;
+  routeCalls.push(path);
+  const res = await exchange.request(
+    init?.method === "POST" ? "POST" : "GET",
+    path,
+    body,
+  );
+  if (res.status !== 200) {
+    throw new Error(String(res.body.error ?? `HTTP ${res.status}`));
+  }
+  return res.body;
+}
 
 // Real-trade calls go through the real wallet routes in the trade harness.
 async function viaTradeRoute(path: string, init?: RequestInit) {
@@ -233,6 +260,9 @@ async function viaTradeRoute(path: string, init?: RequestInit) {
 async function viaRoute(path: string, init?: RequestInit): Promise<unknown> {
   if (path.startsWith("/api/wallet/terminal/trade/")) {
     return viaTradeRoute(path, init);
+  }
+  if (path.startsWith("/api/wallet/terminal/exchange/")) {
+    return viaExchangeRoute(path, init);
   }
   const res = {
     statusCode: 0,
@@ -298,7 +328,9 @@ beforeEach(() => {
   bitcoinPriceOverride = null;
   routeCalls = [];
   trade = null;
+  exchange = null;
   __resetTerminalTradesForTests();
+  __resetTerminalExchangeForTests();
   routeClient.fetch = viaRoute;
   // Stand-in for the agent's PUT /api/permissions/trade-mode.
   routeClient.setTradePermissionMode = async (mode: string) => {
@@ -767,6 +799,63 @@ describe("CryptoTerminalView", () => {
         /^https:\/\/solscan\.io\/tx\/[1-9A-HJ-NP-Za-km-z]{64,88}$/,
       );
       expect(screen.queryByTestId("real-trade-confirm")).toBeNull();
+    });
+
+    it("places a reviewed Kraken limit order on tap and cancels it after asking", async () => {
+      trade = await createTerminalTradeHarness();
+      render(<CryptoTerminalView />);
+      await openRealTrade();
+      const panel = await screen.findByTestId("exchange-panel");
+      fireEvent.change(within(panel).getByTestId("exchange-quantity"), {
+        target: { value: "0.5" },
+      });
+      fireEvent.change(within(panel).getByTestId("exchange-price"), {
+        target: { value: "140.25" },
+      });
+      fireEvent.click(within(panel).getByTestId("exchange-review"));
+      expect(
+        (await screen.findByTestId("exchange-review-order")).textContent,
+      ).toBe("Buy 0.5 SOL at 140.25 USD (limit)");
+      expect(screen.getByTestId("exchange-review-value").textContent).toBe(
+        "70.125 USD",
+      );
+      expect(exchange?.orders).toHaveLength(0);
+
+      fireEvent.click(screen.getByTestId("exchange-confirm"));
+      const result = await screen.findByTestId("exchange-result");
+      expect(result.textContent).toContain(
+        `Placed · order ${exchange?.orders[0]?.orderId}`,
+      );
+      expect(exchange?.orders).toHaveLength(1);
+      fireEvent.click(screen.getByRole("button", { name: "Done" }));
+
+      const orders = await screen.findByTestId("exchange-orders");
+      expect(orders.textContent).toContain("Kraken · buy 0.5 SOLUSD at 140.25");
+      fireEvent.click(within(orders).getByTestId("exchange-order-cancel"));
+      expect(exchange?.orders[0]?.state).toBe("open");
+      fireEvent.click(await screen.findByTestId("exchange-cancel-confirm"));
+      await screen.findByText(/Canceled/);
+      expect(exchange?.orders[0]?.state).toBe("canceled");
+    });
+
+    it("names the settings a venue still needs instead of offering its ticket", async () => {
+      trade = await createTerminalTradeHarness();
+      exchange = createTerminalExchangeHarness({
+        config: trade.config,
+        settings: { OKX_API_KEY: "", OKX_API_SECRET: "" },
+      });
+      render(<CryptoTerminalView />);
+      await openRealTrade();
+      const panel = await screen.findByTestId("exchange-panel");
+      await within(panel).findByTestId("exchange-quantity");
+      fireEvent.click(within(panel).getByRole("button", { name: "OKX" }));
+      expect(within(panel).getByTestId("exchange-missing").textContent).toBe(
+        "Set OKX_API_KEY, OKX_API_SECRET in packages/agent/.env to trade on OKX.",
+      );
+      expect(
+        (within(panel).getByTestId("exchange-review") as HTMLButtonElement)
+          .disabled,
+      ).toBe(true);
     });
 
     it("sends a buy privately through Jito when that route is picked", async () => {

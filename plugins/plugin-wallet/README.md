@@ -96,6 +96,9 @@ Additional optional variables:
 | `BIRDEYE_API_KEY` | Direct Birdeye access (falls back to Eliza Cloud route) |
 | `BIRDEYE_WALLET_ADDR` | Enables portfolio provider for a specific address |
 | `BIRDEYE_NO_TRENDING` | Disable trending provider |
+| `KRAKEN_API_KEY`, `KRAKEN_API_SECRET` | Kraken keys for the terminal's exchange limit orders (trade rights only) |
+| `OKX_API_KEY`, `OKX_API_SECRET`, `OKX_API_PASSPHRASE` | OKX keys for the terminal's exchange limit orders (trade rights only); `OKX_API_BASE_URL` overrides the https origin |
+| `WALLET_TERMINAL_MAX_ORDER_USD` | Largest value of one terminal exchange order, in USD (default 100) |
 | `ELIZA_TERMINAL_MCP_URL` | Agent origin the terminal MCP server reads from; defaults to the local agent port |
 | `LUNARCRUSH_API_KEY` | LunarCrush key for the terminal's Social row and `social_signal`; kept on the server |
 | `ELIZA_AGENT_WALLET_AUTO_ENABLE` | Set to `0` to disable auto-enable |

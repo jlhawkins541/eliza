@@ -43,7 +43,10 @@ through `@elizaos/plugin-zerollama`, so no cloud API key is needed.
      only trading funds. `WALLET_TERMINAL_MAX_BUY_SOL` caps each terminal buy;
      `WALLET_TERMINAL_JITO_TIP_LAMPORTS` sets the tip for trades you send
      privately through Jito. `LUNARCRUSH_API_KEY` (optional) turns on the
-     LunarCrush social signal.
+     LunarCrush social signal. `KRAKEN_API_KEY`/`KRAKEN_API_SECRET` and
+     `OKX_API_KEY`/`OKX_API_SECRET`/`OKX_API_PASSPHRASE` (optional) turn on
+     exchange limit orders; give those keys trade rights only, never
+     withdrawals. `WALLET_TERMINAL_MAX_ORDER_USD` caps each exchange order.
    - **`@elizaos/plugin-sql`**: nothing to set; it stores data in embedded
      PGlite unless you give it `POSTGRES_URL`.
 

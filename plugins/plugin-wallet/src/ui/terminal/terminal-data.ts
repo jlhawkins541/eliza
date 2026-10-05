@@ -17,8 +17,13 @@ import { client } from "@elizaos/ui/api";
 import { shellLocalStorage } from "@elizaos/ui/bridge";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  WalletExchangeOrder,
   WalletTerminalChartDays,
   WalletTerminalChartResponse,
+  WalletTerminalExchangeOrdersResponse,
+  WalletTerminalExchangeReview,
+  WalletTerminalExchangeReviewRequest,
+  WalletTerminalExchangeStatusResponse,
   WalletTerminalMarketsResponse,
   WalletTerminalSocialSignalResponse,
   WalletTerminalTokenPairsResponse,
@@ -833,4 +838,138 @@ export function useRealTrading(): RealTradingHandle {
   );
 
   return { state, refresh, enable, review, execute };
+}
+
+export type ExchangeTradingState =
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ready"; data: WalletTerminalExchangeStatusResponse };
+
+export interface ExchangeTradingHandle {
+  state: ExchangeTradingState;
+  /** Orders placed from this terminal session, newest first. */
+  orders: WalletExchangeOrder[];
+  refresh: () => void;
+  review: (
+    request: WalletTerminalExchangeReviewRequest,
+  ) => Promise<RealTradeOutcome<WalletTerminalExchangeReview>>;
+  execute: (reviewId: string) => Promise<RealTradeOutcome<WalletExchangeOrder>>;
+  refreshOrder: (
+    clientOrderId: string,
+  ) => Promise<RealTradeOutcome<WalletExchangeOrder>>;
+  cancelOrder: (
+    clientOrderId: string,
+  ) => Promise<RealTradeOutcome<WalletExchangeOrder>>;
+}
+
+/** Kraken and OKX readiness, review, execute, and this session's orders. */
+export function useExchangeTrading(): ExchangeTradingHandle {
+  const [state, setState] = useState<ExchangeTradingState>({
+    status: "loading",
+  });
+  const [orders, setOrders] = useState<WalletExchangeOrder[]>([]);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  const load = useCallback(async () => {
+    const next = await attempt(() =>
+      client.fetch<WalletTerminalExchangeStatusResponse>(
+        "/api/wallet/terminal/exchange/status",
+      ),
+    );
+    if (!mounted.current) return;
+    setState(
+      next.ok
+        ? { status: "ready", data: next.value }
+        : { status: "error", message: next.message },
+    );
+    if (next.ok && next.value.realTradingEnabled) {
+      const listed = await attempt(() =>
+        client.fetch<WalletTerminalExchangeOrdersResponse>(
+          "/api/wallet/terminal/exchange/orders",
+        ),
+      );
+      if (mounted.current && listed.ok) setOrders(listed.value.orders);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const refresh = useCallback(() => {
+    setState({ status: "loading" });
+    void load();
+  }, [load]);
+
+  const upsert = useCallback((order: WalletExchangeOrder) => {
+    if (!mounted.current) return;
+    setOrders((current) => [
+      order,
+      ...current.filter((entry) => entry.clientOrderId !== order.clientOrderId),
+    ]);
+  }, []);
+
+  const post = useCallback(
+    async <T>(path: string, body: Record<string, unknown>) =>
+      attempt(() =>
+        client.fetch<T>(path, { method: "POST", body: JSON.stringify(body) }),
+      ),
+    [],
+  );
+
+  const review = useCallback(
+    (request: WalletTerminalExchangeReviewRequest) =>
+      post<WalletTerminalExchangeReview>(
+        "/api/wallet/terminal/exchange/review",
+        { ...request },
+      ),
+    [post],
+  );
+
+  const withOrder = useCallback(
+    async (path: string, body: Record<string, unknown>) => {
+      const outcome = await post<WalletExchangeOrder>(path, body);
+      if (outcome.ok) upsert(outcome.value);
+      return outcome;
+    },
+    [post, upsert],
+  );
+
+  const execute = useCallback(
+    (reviewId: string) =>
+      withOrder("/api/wallet/terminal/exchange/execute", {
+        reviewId,
+        confirm: true,
+      }),
+    [withOrder],
+  );
+  const refreshOrder = useCallback(
+    (clientOrderId: string) =>
+      withOrder("/api/wallet/terminal/exchange/refresh", { clientOrderId }),
+    [withOrder],
+  );
+  const cancelOrder = useCallback(
+    (clientOrderId: string) =>
+      withOrder("/api/wallet/terminal/exchange/cancel", {
+        clientOrderId,
+        confirm: true,
+      }),
+    [withOrder],
+  );
+
+  return {
+    state,
+    orders,
+    refresh,
+    review,
+    execute,
+    refreshOrder,
+    cancelOrder,
+  };
 }

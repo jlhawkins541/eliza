@@ -55,6 +55,16 @@ import {
 import * as ethers from "ethers";
 import { resolveTradePermissionMode } from "../lib/server-wallet-trade.js";
 import {
+  cancelTerminalExchangeOrder,
+  describeTerminalExchange,
+  executeTerminalExchangeOrder,
+  isTerminalExchangeError,
+  listTerminalExchangeOrders,
+  refreshTerminalExchangeOrder,
+  reviewTerminalExchangeOrder,
+  TERMINAL_EXCHANGE_ERROR_STATUS,
+} from "./terminal-exchange.js";
+import {
   describeTerminalTrading,
   executeTerminalTrade,
   isTerminalTradeError,
@@ -943,6 +953,64 @@ async function handleTerminalTradeRoutes(
   return false;
 }
 
+/**
+ * The crypto terminal's Kraken and OKX spot limit orders: readiness, review
+ * (venue check + funds), execute (place the reviewed order once), and the
+ * session's orders with refresh and cancel. See `terminal-exchange.ts`.
+ */
+async function handleTerminalExchangeRoutes(
+  ctx: WalletRouteContext,
+): Promise<boolean> {
+  const { req, res, method, pathname, config, readJsonBody, json, error } = ctx;
+  const runtime = ctx.runtime ?? null;
+  const access = {
+    mode: resolveTradePermissionMode(config),
+    fromAgent: isAgentAutomationRequest(req),
+  };
+  const posts = {
+    "/api/wallet/terminal/exchange/review": reviewTerminalExchangeOrder,
+    "/api/wallet/terminal/exchange/execute": executeTerminalExchangeOrder,
+    "/api/wallet/terminal/exchange/refresh": refreshTerminalExchangeOrder,
+    "/api/wallet/terminal/exchange/cancel": cancelTerminalExchangeOrder,
+  } as const;
+  try {
+    if (
+      method === "GET" &&
+      pathname === "/api/wallet/terminal/exchange/status"
+    ) {
+      json(res, describeTerminalExchange(runtime, access.mode));
+      return true;
+    }
+    if (
+      method === "GET" &&
+      pathname === "/api/wallet/terminal/exchange/orders"
+    ) {
+      json(res, listTerminalExchangeOrders(access));
+      return true;
+    }
+    if (method === "POST" && Object.hasOwn(posts, pathname)) {
+      const body = await readJsonBody<Record<string, unknown>>(req, res);
+      if (!body) return true;
+      const handler = posts[pathname as keyof typeof posts];
+      json(res, await handler(runtime, access, body));
+      return true;
+    }
+  } catch (err) {
+    // error-policy:J1 terminal exchange failures become structured HTTP errors.
+    if (isTerminalExchangeError(err)) {
+      error(res, err.message, TERMINAL_EXCHANGE_ERROR_STATUS[err.code]);
+      return true;
+    }
+    logger.error(
+      { error: err instanceof Error ? err.message : String(err), pathname },
+      "[WalletTerminalExchange] unexpected failure",
+    );
+    error(res, "The exchange order request failed unexpectedly.", 500);
+    return true;
+  }
+  return false;
+}
+
 export async function handleWalletRoutes(
   ctx: WalletRouteContext,
 ): Promise<boolean> {
@@ -1807,6 +1875,10 @@ export async function handleWalletRoutes(
 
   if (pathname.startsWith("/api/wallet/terminal/trade/")) {
     return handleTerminalTradeRoutes(ctx);
+  }
+
+  if (pathname.startsWith("/api/wallet/terminal/exchange/")) {
+    return handleTerminalExchangeRoutes(ctx);
   }
 
   if (method === "GET" && pathname === "/api/wallet/approvals/stream") {

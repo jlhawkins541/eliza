@@ -9,6 +9,10 @@
  * through Jito with a tip), the token safety verdict, and the LunarCrush
  * social signal for buys.
  *
+ * Once real trading is on, the tab also offers Kraken and OKX spot limit
+ * orders (`ExchangeOrderPanel.tsx`), reviewed by the exchange and placed only
+ * on the same kind of confirm tap.
+ *
  * Turning real trading on changes the agent's trade permission to
  * `manual-local-key`, which lets a person trade from the local wallet but never
  * lets the agent trade on its own. The panel shares nothing with paper trading.
@@ -37,6 +41,7 @@ import type {
   WalletTerminalTradeStatusResponse,
   WalletTokenSafetyVerdict,
 } from "../../contracts.ts";
+import { ExchangeOrderPanel } from "./ExchangeOrderPanel.tsx";
 import { LiquidityRow } from "./LiquidityRow.tsx";
 import { SocialSignalRow } from "./SocialSignalRow.tsx";
 import {
@@ -652,9 +657,9 @@ export function RealTradePanel({
       >
         <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warn" />
         <p className="text-xs text-txt">
-          Real trades spend real SOL from your wallet. Each one is simulated
-          first and sent only after you confirm it. Paper orders in the other
-          tabs never touch this wallet.
+          Real trades spend real funds from your wallet or exchange account.
+          Each one is checked first and sent only after you confirm it. Paper
+          orders in the other tabs never touch either.
         </p>
       </div>
       {state.status === "loading" ? (
@@ -692,6 +697,7 @@ export function RealTradePanel({
               initialMint={initialMint}
             />
           )}
+          {state.data.realTradingEnabled ? <ExchangeOrderPanel /> : null}
         </>
       )}
     </div>
