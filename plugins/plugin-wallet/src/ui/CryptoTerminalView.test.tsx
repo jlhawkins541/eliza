@@ -555,8 +555,8 @@ describe("CryptoTerminalView", () => {
       expect(screen.getByTestId("real-trade-fee").textContent).toBe(
         "0.000005 SOL base + 0.00012 SOL priority",
       );
-      expect(screen.getByRole("dialog").textContent).toContain(
-        "Private and Jito bundle routing are not set up.",
+      expect(screen.getByTestId("real-trade-sending").textContent).toBe(
+        "Your Solana RPC. Sent through your Solana RPC with a capped priority fee.",
       );
       expect(screen.getByTestId("real-trade-expiry").textContent).toBe(
         "Quote held for 60s.",
@@ -572,6 +572,32 @@ describe("CryptoTerminalView", () => {
         /^https:\/\/solscan\.io\/tx\/[1-9A-HJ-NP-Za-km-z]{64,88}$/,
       );
       expect(screen.queryByTestId("real-trade-confirm")).toBeNull();
+    });
+
+    it("sends a buy privately through Jito when that route is picked", async () => {
+      trade = await createTerminalTradeHarness();
+      render(<CryptoTerminalView />);
+      await openRealTrade();
+      expect(screen.getByTestId("real-trade-route-note").textContent).toBe(
+        "Uses your Solana RPC with a capped priority fee.",
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Jito (private)" }));
+      expect(screen.getByTestId("real-trade-route-note").textContent).toBe(
+        "Skips the public mempool, which blocks sandwich bots. Adds a 0.0001 SOL tip.",
+      );
+
+      await reviewBuy(trade.tokenMint);
+      expect(screen.getByTestId("real-trade-fee").textContent).toBe(
+        "0.000005 SOL base + 0.0001 SOL Jito tip",
+      );
+      expect(screen.getByTestId("real-trade-sending").textContent).toContain(
+        "Jito. Sent only to Jito's block engine as a bundle",
+      );
+      fireEvent.click(screen.getByTestId("real-trade-confirm"));
+      const result = await screen.findByTestId("real-trade-result");
+      expect(result.textContent).toContain("Trade confirmed on Solana.");
+      expect(trade.sent).toEqual([]);
+      expect(trade.jitoSends).toHaveLength(1);
     });
 
     it("shows a refused buy and never sends a failed simulation", async () => {

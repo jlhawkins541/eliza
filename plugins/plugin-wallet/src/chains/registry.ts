@@ -940,12 +940,17 @@ export interface JupiterSwapBuild {
  * by `execute`, `simulate`, and the crypto terminal's reviewed trades so each
  * builds the exact same unsigned transaction from the exact same quote —
  * simulate never sees a different route than execute would submit.
+ *
+ * With `jitoTipLamports`, Jupiter adds a Jito tip transfer instead of a
+ * priority-fee level (the API takes one or the other), and the transaction
+ * must then be sent through a Jito block engine for the tip to buy anything.
  */
 export async function fetchJupiterSwapTransaction(
   params: WalletRouterParams,
   runtime: IAgentRuntime,
   connection: Connection,
   userPublicKey: PublicKey,
+  options: { jitoTipLamports?: number } = {},
 ): Promise<JupiterSwapBuild> {
   const inputMint = resolveSolanaMint(params.fromToken);
   const outputMint = resolveSolanaMint(params.toToken);
@@ -994,10 +999,15 @@ export async function fetchJupiterSwapTransaction(
         userPublicKey: userPublicKey.toBase58(),
         dynamicComputeUnitLimit: true,
         dynamicSlippage: params.slippageBps === undefined,
-        priorityLevelWithMaxLamports: {
-          maxLamports: JUPITER_MAX_PRIORITY_FEE_LAMPORTS,
-          priorityLevel: "veryHigh",
-        },
+        prioritizationFeeLamports:
+          options.jitoTipLamports === undefined
+            ? {
+                priorityLevelWithMaxLamports: {
+                  maxLamports: JUPITER_MAX_PRIORITY_FEE_LAMPORTS,
+                  priorityLevel: "veryHigh",
+                },
+              }
+            : { jitoTipLamports: options.jitoTipLamports },
       }),
     },
   );

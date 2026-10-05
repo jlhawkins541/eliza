@@ -108,7 +108,10 @@ function find(checks: SetupCheck[], name: string): SetupCheck {
 describe("checkCryptoQueenSetup", () => {
   it("passes every plugin when Ollama, Solana and the character are set up", async () => {
     const wallet = Keypair.generate();
-    const env = fullEnv(wallet);
+    const env = {
+      ...fullEnv(wallet),
+      WALLET_TERMINAL_JITO_TIP_LAMPORTS: "100000",
+    };
     const checks = await checkCryptoQueenSetup(env, deps);
 
     expect(checks.filter((check) => check.status !== "pass")).toEqual([]);
@@ -120,6 +123,9 @@ describe("checkCryptoQueenSetup", () => {
     expect(walletCheck.detail).toContain(wallet.publicKey.toBase58());
     expect(walletCheck.detail).toContain("0.25 SOL");
     expect(services.rpcCalls).toEqual(["getHealth", "getBalance"]);
+    expect(find(checks, "Jito tip").detail).toBe(
+      "Trades sent through Jito tip 0.0001 SOL.",
+    );
     expect(find(checks, "Database").area).toBe("@elizaos/plugin-sql");
     for (const check of checks) {
       expect(check.detail).not.toContain(env.SOLANA_PRIVATE_KEY);
@@ -173,11 +179,12 @@ describe("checkCryptoQueenSetup", () => {
     expect(services.rpcCalls).toEqual(["getHealth"]);
   });
 
-  it("rejects a malformed key and buy cap without echoing the key", async () => {
+  it("rejects a malformed key, buy cap and Jito tip without echoing the key", async () => {
     const env: SetupEnv = {
       ...fullEnv(Keypair.generate()),
       SOLANA_PRIVATE_KEY: "not-a-key",
       WALLET_TERMINAL_MAX_BUY_SOL: "0",
+      WALLET_TERMINAL_JITO_TIP_LAMPORTS: "500",
     };
     const checks = await checkCryptoQueenSetup(env, deps);
 
@@ -185,6 +192,7 @@ describe("checkCryptoQueenSetup", () => {
     expect(walletCheck.status).toBe("fail");
     expect(walletCheck.detail).not.toContain("not-a-key");
     expect(find(checks, "Real trade buy cap").status).toBe("fail");
+    expect(find(checks, "Jito tip").status).toBe("fail");
   });
 
   it("warns when a cloud model key could answer instead of Ollama", async () => {

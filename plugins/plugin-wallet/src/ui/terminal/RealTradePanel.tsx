@@ -5,7 +5,8 @@
  * the exact transaction, and is sent only when the person taps Confirm inside
  * the review window. The review shows what the architecture notes require
  * before signing: chain, mint, amounts, minimum output, slippage, destination,
- * fee budget, route, simulation, private routing, and the token safety verdict.
+ * fee budget, route, simulation, how it is sent (the Solana RPC, or privately
+ * through Jito with a tip), and the token safety verdict.
  *
  * Turning real trading on changes the agent's trade permission to
  * `manual-local-key`, which lets a person trade from the local wallet but never
@@ -30,6 +31,7 @@ import type {
   WalletTerminalTradeAmount,
   WalletTerminalTradeExecuteResponse,
   WalletTerminalTradeReview,
+  WalletTerminalTradeSendRoute,
   WalletTerminalTradeSide,
   WalletTerminalTradeStatusResponse,
   WalletTokenSafetyVerdict,
@@ -46,6 +48,14 @@ void React;
 const SIDE_ITEMS: Array<{ value: WalletTerminalTradeSide; label: string }> = [
   { value: "buy", label: "Buy with SOL" },
   { value: "sell", label: "Sell for SOL" },
+];
+
+const SEND_ROUTE_ITEMS: Array<{
+  value: WalletTerminalTradeSendRoute;
+  label: string;
+}> = [
+  { value: "rpc", label: "Your RPC" },
+  { value: "jito", label: "Jito (private)" },
 ];
 
 const SAFETY_COPY: Record<WalletTokenSafetyVerdict, string> = {
@@ -242,10 +252,13 @@ function ReviewDialog({
               <Row label="Goes to">{review.walletAddress}</Row>
               <Row label="Network fee" testId="real-trade-fee">
                 {formatSol(fee.baseFeeLamports)} base +{" "}
-                {fee.priorityFeeLamports === null
-                  ? `up to ${formatSol(fee.maxPriorityFeeLamports)}`
-                  : formatSol(fee.priorityFeeLamports)}{" "}
-                priority
+                {fee.route === "jito"
+                  ? `${formatSol(fee.jitoTipLamports)} Jito tip`
+                  : `${
+                      fee.priorityFeeLamports === null
+                        ? `up to ${formatSol(fee.maxPriorityFeeLamports)}`
+                        : formatSol(fee.priorityFeeLamports)
+                    } priority`}
               </Row>
               <Row label="Route">
                 {review.route.length > 0
@@ -257,8 +270,9 @@ function ReviewDialog({
                       .join(", ")
                   : "Not reported"}
               </Row>
-              <Row label="Private / Jito routing">
-                {review.privateRouting.detail}
+              <Row label="Sent via" testId="real-trade-sending">
+                {review.sending.route === "jito" ? "Jito" : "Your Solana RPC"}.{" "}
+                {review.sending.detail}
               </Row>
               <Row label="Simulation" testId="real-trade-simulation">
                 {review.simulation.success
@@ -404,6 +418,8 @@ function TradeTicket({
       ? 100
       : (status.slippageChoicesBps[0] ?? 100),
   );
+  const [sendRoute, setSendRoute] =
+    useState<WalletTerminalTradeSendRoute>("rpc");
   const [reviewing, setReviewing] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [review, setReview] = useState<WalletTerminalTradeReview | null>(null);
@@ -426,6 +442,7 @@ function TradeTicket({
       mint: mint.trim(),
       amount: amount.trim(),
       slippageBps,
+      sendRoute,
     };
     void trading.review(request).then((outcome) => {
       setReviewing(false);
@@ -510,6 +527,25 @@ function TradeTicket({
             }))}
             aria-label="Slippage"
           />
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="text-xs text-muted">Send through</span>
+          <SegmentedControl
+            value={sendRoute}
+            onValueChange={(value) =>
+              setSendRoute(value as WalletTerminalTradeSendRoute)
+            }
+            items={SEND_ROUTE_ITEMS}
+            aria-label="Send through"
+          />
+          <span
+            className="text-xs text-muted"
+            data-testid="real-trade-route-note"
+          >
+            {sendRoute === "jito"
+              ? `Skips the public mempool, which blocks sandwich bots. Adds a ${formatSol(status.jito.tipLamports)} tip.`
+              : "Uses your Solana RPC with a capped priority fee."}
+          </span>
         </div>
         {formError ? (
           <p role="alert" className="text-xs text-danger">

@@ -3,8 +3,10 @@
  * request goes through the real `handleWalletRoutes`, `terminal-trade.ts`, and
  * Jupiter swap builder. The runtime's Jupiter API answers with real-shaped
  * quote and swap payloads whose swap transaction is a real unsigned v0
- * transaction paid by the test wallet; its Solana RPC is an in-memory double
- * that records every simulate, send, and confirm; and its wallet backend is a
+ * transaction paid by the test wallet; its Jito block engine records each
+ * bundle-only send and answers like Jito's JSON-RPC; its Solana RPC is an
+ * in-memory double that records every simulate, send, and confirm; and its
+ * wallet backend is a
  * real `LocalEoaBackend` over a key generated per harness, so signatures are
  * real. No network is used and no real key exists here.
  */
@@ -24,6 +26,7 @@ import { SOLANA_SERVICE_NAME } from "../../chains/solana/constants";
 import { DEFAULT_JUPITER_API_BASE_URL } from "../../chains/solana/jupiter-api";
 import { WALLET_BACKEND_SERVICE_TYPE } from "../../services/wallet-backend-service";
 import { LocalEoaBackend } from "../../wallet/local-eoa-backend";
+import { DEFAULT_JITO_BLOCK_ENGINE_URL } from "../terminal-trade";
 import { handleWalletRoutes, type WalletRouteContext } from "../wallet-routes";
 
 /** Decimals of the harness token mint. */
@@ -54,6 +57,12 @@ export interface TerminalTradeHarness {
   readonly runtime: IAgentRuntime;
   /** Every Jupiter URL requested, in order. */
   readonly jupiterCalls: string[];
+  /** Parsed bodies of each Jupiter `/swap` request. */
+  readonly swapRequests: Record<string, unknown>[];
+  /** Each Jito send: the full URL and the signed transaction bytes. */
+  readonly jitoSends: Array<{ url: string; bytes: Uint8Array }>;
+  /** A JSON-RPC error message the block engine answers with, when set. */
+  jitoError: string | null;
   /** Transactions passed to `simulateTransaction`. */
   readonly simulated: VersionedTransaction[];
   /** Raw bytes passed to `sendRawTransaction`. */
@@ -130,6 +139,9 @@ export async function createTerminalTradeHarness(
       features: { tradePermissionMode: options.mode ?? "manual-local-key" },
     },
     jupiterCalls: [] as string[],
+    swapRequests: [] as Record<string, unknown>[],
+    jitoSends: [] as Array<{ url: string; bytes: Uint8Array }>,
+    jitoError: null as string | null,
     simulated: [] as VersionedTransaction[],
     sent: [] as Uint8Array[],
     built: [] as VersionedTransaction[],
@@ -183,8 +195,44 @@ export async function createTerminalTradeHarness(
     }),
   };
 
-  const jupiterFetch = async (input: RequestInfo | URL) => {
+  const networkFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
+    const block = new URL(url);
+    if (
+      block.origin === new URL(DEFAULT_JITO_BLOCK_ENGINE_URL).origin ||
+      block.hostname.endsWith(".block-engine.test")
+    ) {
+      const call = JSON.parse(String(init?.body)) as {
+        id: number;
+        method: string;
+        params: [string, { encoding: string }];
+      };
+      if (
+        block.pathname !== "/api/v1/transactions" ||
+        call.method !== "sendTransaction" ||
+        call.params[1].encoding !== "base64"
+      ) {
+        throw new Error(`unexpected Jito request: ${url}`);
+      }
+      const bytes = new Uint8Array(Buffer.from(call.params[0], "base64"));
+      if (harness.jitoError) {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: call.id,
+            error: { code: -32602, message: harness.jitoError },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      harness.jitoSends.push({ url, bytes });
+      const signature = VersionedTransaction.deserialize(bytes).signatures[0];
+      return json({
+        jsonrpc: "2.0",
+        id: call.id,
+        result: bs58.encode(signature ?? new Uint8Array(64)),
+      });
+    }
     harness.jupiterCalls.push(url);
     if (url.startsWith(`${DEFAULT_JUPITER_API_BASE_URL}/quote?`)) {
       const query = new URL(url).searchParams;
@@ -214,6 +262,9 @@ export async function createTerminalTradeHarness(
       });
     }
     if (url === `${DEFAULT_JUPITER_API_BASE_URL}/swap`) {
+      harness.swapRequests.push(
+        JSON.parse(String(init?.body)) as Record<string, unknown>,
+      );
       const transaction = unsignedSwap(harness.swapPayer ?? wallet.publicKey);
       harness.built.push(transaction);
       return json({
@@ -236,7 +287,7 @@ export async function createTerminalTradeHarness(
   const runtime = {
     agentId: "terminal-trade-test",
     character: { name: "Terminal Trade Test", settings: {} },
-    fetch: jupiterFetch,
+    fetch: networkFetch,
     getSetting: (key: string) => settings[key] ?? null,
     getService: (name: string) =>
       name === SOLANA_SERVICE_NAME

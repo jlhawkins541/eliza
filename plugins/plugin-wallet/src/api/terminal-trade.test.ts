@@ -5,7 +5,8 @@
  * boundary (see `__tests__/terminal-trade-harness.ts`). Covers the permission
  * gate, agent refusal, review details, executing exactly the reviewed bytes
  * with a verifiable signature, single use, expiry, failed simulations, the buy
- * limit, wallet and fee-payer mismatches, input validation, and send outcomes.
+ * limit, wallet and fee-payer mismatches, input validation, send outcomes,
+ * and the Jito route (tip in the swap request, bundle-only send, settings).
  */
 import { VersionedTransaction } from "@solana/web3.js";
 import bs58 from "bs58";
@@ -28,7 +29,13 @@ const EXECUTE = "/api/wallet/terminal/trade/execute";
 const START = Date.parse("2026-10-03T21:00:00.000Z");
 
 function buy(h: TerminalTradeHarness, amount = "0.5") {
-  return { side: "buy", mint: h.tokenMint, amount, slippageBps: 100 };
+  return {
+    side: "buy",
+    mint: h.tokenMint,
+    amount,
+    slippageBps: 100,
+    sendRoute: "rpc",
+  };
 }
 
 async function reviewId(h: TerminalTradeHarness): Promise<string> {
@@ -60,6 +67,10 @@ describe("terminal trade status", () => {
         maxBuySol: 1,
         slippageChoicesBps: [50, 100, 300],
         reviewSeconds: 60,
+        jito: {
+          tipLamports: 100_000,
+          blockEngineUrl: "https://mainnet.block-engine.jito.wtf",
+        },
       },
     });
   });
@@ -170,11 +181,12 @@ describe("terminal trade review and execute", () => {
         },
       ],
       fee: {
+        route: "rpc",
         baseFeeLamports: 5_000,
         priorityFeeLamports: HARNESS_PRIORITY_FEE_LAMPORTS,
         maxPriorityFeeLamports: 4_000_000,
       },
-      privateRouting: { available: false },
+      sending: { route: "rpc" },
       simulation: {
         success: true,
         err: null,
@@ -186,6 +198,13 @@ describe("terminal trade review and execute", () => {
     const quoteUrl = new URL(h.jupiterCalls[0] ?? "");
     expect(quoteUrl.searchParams.get("amount")).toBe("500000000");
     expect(quoteUrl.searchParams.get("slippageBps")).toBe("100");
+    // Jupiter reads the fee level only when nested under prioritizationFeeLamports.
+    expect(h.swapRequests[0]?.prioritizationFeeLamports).toEqual({
+      priorityLevelWithMaxLamports: {
+        maxLamports: 4_000_000,
+        priorityLevel: "veryHigh",
+      },
+    });
     expect(h.simulated).toHaveLength(1);
     expect(h.sent).toEqual([]);
 
@@ -234,6 +253,7 @@ describe("terminal trade review and execute", () => {
       mint: h.tokenMint,
       amount: "2500.5",
       slippageBps: 50,
+      sendRoute: "jito",
     });
     expect(review.status).toBe(200);
     expect(review.body).toMatchObject({
@@ -332,6 +352,8 @@ describe("terminal trade review and execute", () => {
       [{ ...buy(h), amount: "-1" }, /greater than zero/],
       [{ ...buy(h), amount: "0.0000000001" }, /at most 9 decimal/],
       [{ ...buy(h), slippageBps: 2_000 }, /slippageBps must be one of/],
+      [{ ...buy(h), sendRoute: "fast" }, /sendRoute must be "rpc" or "jito"/],
+      [{ ...buy(h), sendRoute: undefined }, /sendRoute must be/],
     ];
     for (const [body, error] of cases) {
       const review = await h.request("POST", REVIEW, body);
@@ -392,5 +414,120 @@ describe("terminal trade send outcomes", () => {
     expect(execute.body.error).toMatch(
       /^Solana RPC did not accept the trade \(Transaction simulation failed\)\. If you're unsure whether it went through, look up [1-9A-HJ-NP-Za-km-z]{64,88} before trying again\.$/,
     );
+  });
+});
+
+describe("terminal trade Jito route", () => {
+  function jitoBuy(h: TerminalTradeHarness) {
+    return { ...buy(h), sendRoute: "jito" };
+  }
+
+  it("asks Jupiter for a Jito tip and sends the reviewed bytes only to the block engine", async () => {
+    const h = await createTerminalTradeHarness();
+    const review = await h.request("POST", REVIEW, jitoBuy(h));
+    expect(review.status).toBe(200);
+    expect(review.body).toMatchObject({
+      fee: { route: "jito", baseFeeLamports: 5_000, jitoTipLamports: 100_000 },
+      sending: {
+        route: "jito",
+        blockEngineUrl: "https://mainnet.block-engine.jito.wtf",
+      },
+      canConfirm: true,
+    });
+    expect(h.swapRequests[0]?.prioritizationFeeLamports).toEqual({
+      jitoTipLamports: 100_000,
+    });
+    expect(h.simulated).toHaveLength(1);
+    expect(h.jitoSends).toEqual([]);
+
+    const execute = await h.request("POST", EXECUTE, {
+      reviewId: review.body.reviewId,
+      confirm: true,
+    });
+    expect(execute.status).toBe(200);
+    expect(execute.body.status).toBe("confirmed");
+    expect(h.sent).toEqual([]);
+    expect(h.jitoSends).toHaveLength(1);
+    const jito = h.jitoSends[0] as { url: string; bytes: Uint8Array };
+    expect(jito.url).toBe(
+      "https://mainnet.block-engine.jito.wtf/api/v1/transactions?bundleOnly=true",
+    );
+    const sent = VersionedTransaction.deserialize(jito.bytes);
+    expect(Buffer.from(sent.message.serialize())).toEqual(
+      Buffer.from((h.built[0] as VersionedTransaction).message.serialize()),
+    );
+    const signature = sent.signatures[0] as Uint8Array;
+    expect(
+      nacl.sign.detached.verify(
+        sent.message.serialize(),
+        signature,
+        h.wallet.publicKey.toBytes(),
+      ),
+    ).toBe(true);
+    expect(execute.body.signature).toBe(bs58.encode(signature));
+  });
+
+  it("uses the configured tip and block engine", async () => {
+    const h = await createTerminalTradeHarness({
+      settings: {
+        WALLET_TERMINAL_JITO_TIP_LAMPORTS: "250000",
+        JITO_BLOCK_ENGINE_URL: "https://ny.block-engine.test/",
+      },
+    });
+    const status = await h.request("GET", STATUS);
+    expect(status.body.jito).toEqual({
+      tipLamports: 250_000,
+      blockEngineUrl: "https://ny.block-engine.test",
+    });
+    const review = await h.request("POST", REVIEW, jitoBuy(h));
+    expect(h.swapRequests[0]?.prioritizationFeeLamports).toEqual({
+      jitoTipLamports: 250_000,
+    });
+    await h.request("POST", EXECUTE, {
+      reviewId: review.body.reviewId,
+      confirm: true,
+    });
+    expect(h.jitoSends.map((send) => send.url)).toEqual([
+      "https://ny.block-engine.test/api/v1/transactions?bundleOnly=true",
+    ]);
+  });
+
+  it("reports a tip or block engine setting it can't use instead of guessing", async () => {
+    const cases: Array<[Record<string, string>, RegExp]> = [
+      [{ WALLET_TERMINAL_JITO_TIP_LAMPORTS: "999" }, /from 1000 to 4000000/],
+      [{ WALLET_TERMINAL_JITO_TIP_LAMPORTS: "4000001" }, /from 1000/],
+      [{ WALLET_TERMINAL_JITO_TIP_LAMPORTS: "0.5" }, /whole number/],
+      [{ JITO_BLOCK_ENGINE_URL: "http://ny.block-engine.test" }, /https/],
+      [{ JITO_BLOCK_ENGINE_URL: "block engine" }, /https/],
+    ];
+    for (const [settings, error] of cases) {
+      const h = await createTerminalTradeHarness({ settings });
+      const status = await h.request("GET", STATUS);
+      expect(status.status).toBe(500);
+      expect(status.body.error).toMatch(error);
+      const review = await h.request("POST", REVIEW, jitoBuy(h));
+      expect(review.status).toBe(500);
+      expect(h.jupiterCalls).toEqual([]);
+    }
+  });
+
+  it("names the signature when the block engine refuses the send", async () => {
+    const h = await createTerminalTradeHarness();
+    h.jitoError = "bundle tip too low";
+    const review = await h.request("POST", REVIEW, jitoBuy(h));
+    const execute = await h.request("POST", EXECUTE, {
+      reviewId: review.body.reviewId,
+      confirm: true,
+    });
+    expect(execute.status).toBe(502);
+    expect(execute.body.error).toMatch(
+      /^Jito did not accept the trade \(bundle tip too low\)\. If you're unsure whether it went through, look up [1-9A-HJ-NP-Za-km-z]{64,88} before trying again\.$/,
+    );
+    expect(h.sent).toEqual([]);
+    const again = await h.request("POST", EXECUTE, {
+      reviewId: review.body.reviewId,
+      confirm: true,
+    });
+    expect(again.status).toBe(409);
   });
 });

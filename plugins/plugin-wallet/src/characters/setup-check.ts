@@ -385,6 +385,29 @@ async function checkSolana(
           },
     );
   }
+
+  // Same bounds terminal-trade.ts enforces: Jito's minimum tip up to the RPC
+  // route's priority-fee cap.
+  const jitoTip = setting(env, "WALLET_TERMINAL_JITO_TIP_LAMPORTS");
+  if (jitoTip !== null) {
+    const value = Number(jitoTip);
+    checks.push(
+      Number.isSafeInteger(value) && value >= 1_000 && value <= 4_000_000
+        ? {
+            area,
+            name: "Jito tip",
+            status: "pass",
+            detail: `Trades sent through Jito tip ${value / 1_000_000_000} SOL.`,
+          }
+        : {
+            area,
+            name: "Jito tip",
+            status: "fail",
+            detail:
+              "WALLET_TERMINAL_JITO_TIP_LAMPORTS must be a whole number from 1000 to 4000000.",
+          },
+    );
+  }
   return checks;
 }
 

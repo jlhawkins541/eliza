@@ -40,7 +40,9 @@ through `@elizaos/plugin-zerollama`, so no cloud API key is needed.
    - **`@elizaos/plugin-wallet`**: `SOLANA_RPC_URL` (without it the wallet
      skips Solana, so balances, `token_info` and Real trade don't work) and,
      for real trades, `SOLANA_PRIVATE_KEY` of a separate hot wallet that holds
-     only trading funds. `WALLET_TERMINAL_MAX_BUY_SOL` caps each terminal buy.
+     only trading funds. `WALLET_TERMINAL_MAX_BUY_SOL` caps each terminal buy;
+     `WALLET_TERMINAL_JITO_TIP_LAMPORTS` sets the tip for trades you send
+     privately through Jito.
    - **`@elizaos/plugin-sql`**: nothing to set; it stores data in embedded
      PGlite unless you give it `POSTGRES_URL`.
 

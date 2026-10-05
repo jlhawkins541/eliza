@@ -11,7 +11,13 @@
  * requests marked as agent automation, so a terminal trade always rests on a
  * person's tap. A review is single-use, expires with its quote, and cannot be
  * executed when its simulation failed. Each buy is capped by
- * `WALLET_TERMINAL_MAX_BUY_SOL`. Failures are `ElizaError`s whose codes map to
+ * `WALLET_TERMINAL_MAX_BUY_SOL`.
+ *
+ * A trade goes out one of two ways, chosen per review: through the Solana RPC
+ * with a capped priority fee, or with a Jito tip
+ * (`WALLET_TERMINAL_JITO_TIP_LAMPORTS`) straight to a Jito block engine
+ * (`JITO_BLOCK_ENGINE_URL`) as a bundle-only send, which keeps it out of the
+ * public mempool. Either way the RPC confirms the result. Failures are `ElizaError`s whose codes map to
  * HTTP statuses through {@link TERMINAL_TRADE_ERROR_STATUS}.
  */
 import crypto from "node:crypto";
@@ -32,6 +38,7 @@ import type {
   WalletTerminalTradeAmount,
   WalletTerminalTradeExecuteResponse,
   WalletTerminalTradeReview,
+  WalletTerminalTradeSendRoute,
   WalletTerminalTradeSide,
   WalletTerminalTradeStatusResponse,
   WalletTerminalTradeWallet,
@@ -47,6 +54,14 @@ export const TERMINAL_TRADE_REVIEW_TTL_MS = 60_000;
 export const TERMINAL_TRADE_SLIPPAGE_BPS = [50, 100, 300] as const;
 export const TERMINAL_MAX_BUY_SOL_SETTING = "WALLET_TERMINAL_MAX_BUY_SOL";
 export const DEFAULT_TERMINAL_MAX_BUY_SOL = 1;
+export const TERMINAL_JITO_TIP_SETTING = "WALLET_TERMINAL_JITO_TIP_LAMPORTS";
+export const DEFAULT_TERMINAL_JITO_TIP_LAMPORTS = 100_000;
+/** Jito's minimum bundle tip. */
+export const MIN_TERMINAL_JITO_TIP_LAMPORTS = 1_000;
+export const JITO_BLOCK_ENGINE_URL_SETTING = "JITO_BLOCK_ENGINE_URL";
+export const DEFAULT_JITO_BLOCK_ENGINE_URL =
+  "https://mainnet.block-engine.jito.wtf";
+const SEND_ROUTES: readonly WalletTerminalTradeSendRoute[] = ["rpc", "jito"];
 const SOL_DECIMALS = 9;
 const SOLANA_BASE_FEE_LAMPORTS = 5_000;
 const AMOUNT_PATTERN = /^\d{1,20}(?:\.\d{1,18})?$/;
@@ -79,6 +94,7 @@ interface PendingTerminalTrade {
   readonly canConfirm: boolean;
   readonly side: WalletTerminalTradeSide;
   readonly mint: string;
+  readonly sending: WalletTerminalTradeReview["sending"];
   used: boolean;
 }
 
@@ -244,6 +260,58 @@ function resolveMaxBuySol(runtime: IAgentRuntime): number {
   return value;
 }
 
+/**
+ * The Jito tip in lamports: Jito's minimum at least, and no more than the
+ * priority-fee cap an RPC send may pay, so a typo can't spend a large tip.
+ */
+function resolveJitoTipLamports(runtime: IAgentRuntime): number {
+  const raw = runtime.getSetting(TERMINAL_JITO_TIP_SETTING);
+  if (raw === null || raw === undefined || raw === "") {
+    return DEFAULT_TERMINAL_JITO_TIP_LAMPORTS;
+  }
+  const value = typeof raw === "number" ? raw : Number(String(raw).trim());
+  if (
+    !Number.isSafeInteger(value) ||
+    value < MIN_TERMINAL_JITO_TIP_LAMPORTS ||
+    value > JUPITER_MAX_PRIORITY_FEE_LAMPORTS
+  ) {
+    throw tradeError(
+      "TERMINAL_TRADE_LIMIT_INVALID",
+      `${TERMINAL_JITO_TIP_SETTING} must be a whole number of lamports from ${MIN_TERMINAL_JITO_TIP_LAMPORTS} to ${JUPITER_MAX_PRIORITY_FEE_LAMPORTS}.`,
+      { context: { value: String(raw) } },
+    );
+  }
+  return value;
+}
+
+function resolveJitoBlockEngineUrl(runtime: IAgentRuntime): string {
+  const raw = runtime.getSetting(JITO_BLOCK_ENGINE_URL_SETTING);
+  if (raw === null || raw === undefined || raw === "") {
+    return DEFAULT_JITO_BLOCK_ENGINE_URL;
+  }
+  const value = String(raw).trim().replace(/\/+$/, "");
+  let url: URL | null;
+  try {
+    url = new URL(value);
+  } catch {
+    // error-policy:J3 an unparseable address is reported below, not replaced.
+    url = null;
+  }
+  if (
+    url === null ||
+    url.protocol !== "https:" ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    throw tradeError(
+      "TERMINAL_TRADE_LIMIT_INVALID",
+      `${JITO_BLOCK_ENGINE_URL_SETTING} must be an https block engine address, such as ${DEFAULT_JITO_BLOCK_ENGINE_URL}.`,
+      { context: { value: String(raw) } },
+    );
+  }
+  return value;
+}
+
 /** Real-trading readiness for the terminal's Real trade tab. */
 export function describeTerminalTrading(
   runtime: IAgentRuntime | null,
@@ -257,6 +325,10 @@ export function describeTerminalTrading(
     maxBuySol: resolveMaxBuySol(agentRuntime),
     slippageChoicesBps: [...TERMINAL_TRADE_SLIPPAGE_BPS],
     reviewSeconds: TERMINAL_TRADE_REVIEW_TTL_MS / 1000,
+    jito: {
+      tipLamports: resolveJitoTipLamports(agentRuntime),
+      blockEngineUrl: resolveJitoBlockEngineUrl(agentRuntime),
+    },
   };
 }
 
@@ -264,6 +336,7 @@ type ParsedReviewRequest = {
   mint: string;
   amount: string;
   slippageBps: number;
+  sendRoute: WalletTerminalTradeSendRoute;
 } & ({ side: "buy"; lamports: bigint } | { side: "sell"; lamports: null });
 
 function invalid(message: string): ElizaError {
@@ -310,14 +383,29 @@ function parseReviewRequest(
       `slippageBps must be one of ${TERMINAL_TRADE_SLIPPAGE_BPS.join(", ")}.`,
     );
   }
+  const sendRoute = body.sendRoute;
+  if (
+    typeof sendRoute !== "string" ||
+    !(SEND_ROUTES as readonly string[]).includes(sendRoute)
+  ) {
+    throw invalid('sendRoute must be "rpc" or "jito".');
+  }
+  const route = sendRoute as WalletTerminalTradeSendRoute;
   if (side === "sell") {
-    return { side, mint, amount, slippageBps, lamports: null };
+    return {
+      side,
+      mint,
+      amount,
+      slippageBps,
+      sendRoute: route,
+      lamports: null,
+    };
   }
   const lamports = toBaseUnits(amount, SOL_DECIMALS);
   if (lamports === null) {
     throw invalid("SOL amounts have at most 9 decimal places.");
   }
-  return { side, mint, amount, slippageBps, lamports };
+  return { side, mint, amount, slippageBps, sendRoute: route, lamports };
 }
 
 function assertWithinBuyLimit(
@@ -353,6 +441,7 @@ async function buildSwap(
   runtime: IAgentRuntime,
   request: ParsedReviewRequest,
   walletPublicKey: PublicKey,
+  jitoTipLamports: number | null,
 ): Promise<{ build: JupiterSwapBuild; outputDecimals: number }> {
   const connection = getSolanaConnection(runtime);
   try {
@@ -370,6 +459,7 @@ async function buildSwap(
       runtime,
       connection,
       walletPublicKey,
+      jitoTipLamports === null ? {} : { jitoTipLamports },
     );
     const outputDecimals =
       build.outputMint === SOL_MINT
@@ -402,12 +492,20 @@ export async function reviewTerminalTrade(
   if (request.side === "buy") {
     assertWithinBuyLimit(request, maxBuySol, request.lamports);
   }
+  const jito =
+    request.sendRoute === "jito"
+      ? {
+          tipLamports: resolveJitoTipLamports(agentRuntime),
+          blockEngineUrl: resolveJitoBlockEngineUrl(agentRuntime),
+        }
+      : null;
   const signer = resolveSigner(agentRuntime);
   const walletAddress = signer.publicKey.toBase58();
   const { build, outputDecimals } = await buildSwap(
     agentRuntime,
     request,
     signer.publicKey,
+    jito?.tipLamports ?? null,
   );
 
   const feePayer = build.transaction.message.staticAccountKeys[0];
@@ -445,6 +543,30 @@ export async function reviewTerminalTrade(
     );
   }
 
+  const fee: WalletTerminalTradeReview["fee"] = jito
+    ? {
+        route: "jito",
+        baseFeeLamports: SOLANA_BASE_FEE_LAMPORTS,
+        jitoTipLamports: jito.tipLamports,
+      }
+    : {
+        route: "rpc",
+        baseFeeLamports: SOLANA_BASE_FEE_LAMPORTS,
+        priorityFeeLamports: build.priorityFeeLamports,
+        maxPriorityFeeLamports: JUPITER_MAX_PRIORITY_FEE_LAMPORTS,
+      };
+  const sending: WalletTerminalTradeReview["sending"] = jito
+    ? {
+        route: "jito",
+        blockEngineUrl: jito.blockEngineUrl,
+        detail:
+          "Sent only to Jito's block engine as a bundle, not to the public mempool. It lands only with its tip.",
+      }
+    : {
+        route: "rpc",
+        detail: "Sent through your Solana RPC with a capped priority fee.",
+      };
+
   const now = Date.now();
   prunePendingTrades(now);
   const reviewId = crypto.randomUUID();
@@ -457,6 +579,7 @@ export async function reviewTerminalTrade(
     canConfirm: simulation.success,
     side: request.side,
     mint: request.mint,
+    sending,
     used: false,
   });
 
@@ -475,16 +598,8 @@ export async function reviewTerminalTrade(
         ? build.quoteSummary.priceImpactPct
         : null,
     route: build.route.map((leg) => ({ ...leg })),
-    fee: {
-      baseFeeLamports: SOLANA_BASE_FEE_LAMPORTS,
-      priorityFeeLamports: build.priorityFeeLamports,
-      maxPriorityFeeLamports: JUPITER_MAX_PRIORITY_FEE_LAMPORTS,
-    },
-    privateRouting: {
-      available: false,
-      detail:
-        "Sent through your Solana RPC. Private and Jito bundle routing are not set up.",
-    },
+    fee,
+    sending: { ...sending },
     simulation: { ...simulation, logs: [...simulation.logs] },
     canConfirm: simulation.success,
   };
@@ -496,6 +611,55 @@ function prunePendingTrades(now: number): void {
     if (now > trade.expiresAt + TERMINAL_TRADE_REVIEW_TTL_MS) {
       pendingTrades.delete(id);
     }
+  }
+}
+
+interface JitoSendReply {
+  result?: unknown;
+  error?: { message?: unknown };
+}
+
+/**
+ * Hand a signed transaction to a Jito block engine with `bundleOnly=true`, so
+ * Jito wraps it in a bundle and never forwards it to RPC nodes. Jito always
+ * skips preflight; the review's simulation is the preflight here.
+ */
+async function sendThroughJito(
+  runtime: IAgentRuntime,
+  blockEngineUrl: string,
+  signed: VersionedTransaction,
+): Promise<void> {
+  const fetchFn = runtime.fetch ?? globalThis.fetch;
+  const response = await fetchFn(
+    `${blockEngineUrl}/api/v1/transactions?bundleOnly=true`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: 1,
+        jsonrpc: "2.0",
+        method: "sendTransaction",
+        params: [
+          Buffer.from(signed.serialize()).toString("base64"),
+          { encoding: "base64" },
+        ],
+      }),
+    },
+  );
+  const text = await response.text();
+  let reply: JitoSendReply;
+  try {
+    reply = JSON.parse(text) as JitoSendReply;
+  } catch {
+    // error-policy:J3 a non-JSON reply is reported with its HTTP status.
+    reply = {};
+  }
+  if (!response.ok || reply.error || typeof reply.result !== "string") {
+    throw new Error(
+      typeof reply.error?.message === "string"
+        ? reply.error.message
+        : `HTTP ${response.status}`,
+    );
   }
 }
 
@@ -583,18 +747,24 @@ export async function executeTerminalTrade(
   };
 
   const connection = getSolanaConnection(agentRuntime);
+  const route = pending.sending;
   try {
-    await connection.sendRawTransaction(signed.serialize(), {
-      skipPreflight: false,
-      maxRetries: 3,
-      preflightCommitment: "confirmed",
-    });
+    if (route.route === "jito") {
+      await sendThroughJito(agentRuntime, route.blockEngineUrl, signed);
+    } else {
+      await connection.sendRawTransaction(signed.serialize(), {
+        skipPreflight: false,
+        maxRetries: 3,
+        preflightCommitment: "confirmed",
+      });
+    }
   } catch (cause) {
     // error-policy:J2 a refused send keeps the signature for the person to check.
+    const sender = route.route === "jito" ? "Jito" : "Solana RPC";
     throw tradeError(
       "TERMINAL_TRADE_UPSTREAM_FAILED",
-      `Solana RPC did not accept the trade (${messageOf(cause)}). If you're unsure whether it went through, look up ${signature} before trying again.`,
-      { cause, context },
+      `${sender} did not accept the trade (${messageOf(cause)}). If you're unsure whether it went through, look up ${signature} before trying again.`,
+      { cause, context: { ...context, route: route.route } },
     );
   }
 
@@ -638,7 +808,10 @@ export async function executeTerminalTrade(
     };
   }
 
-  agentRuntime.logger.info(context, "[WalletTerminalTrade] trade confirmed");
+  agentRuntime.logger.info(
+    { ...context, route: route.route },
+    "[WalletTerminalTrade] trade confirmed",
+  );
   return {
     status: "confirmed",
     signature,

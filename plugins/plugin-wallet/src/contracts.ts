@@ -162,6 +162,13 @@ export interface WalletTerminalTokenSafetyResponse {
 /** A terminal real trade spends SOL for a token (buy) or the reverse (sell). */
 export type WalletTerminalTradeSide = "buy" | "sell";
 
+/**
+ * How a terminal trade is sent: `rpc` submits it through the configured Solana
+ * RPC with a capped priority fee; `jito` adds a Jito tip and sends it only to a
+ * Jito block engine as a bundle, so it is never broadcast to the public mempool.
+ */
+export type WalletTerminalTradeSendRoute = "rpc" | "jito";
+
 /** Whether this wallet can sign Solana trades for the terminal. */
 export type WalletTerminalTradeWallet =
   | { canSign: true; address: string }
@@ -178,6 +185,8 @@ export interface WalletTerminalTradeStatusResponse {
   slippageChoicesBps: number[];
   /** How long a review can be confirmed, in seconds. */
   reviewSeconds: number;
+  /** The tip and block engine a `jito` send uses. */
+  jito: { tipLamports: number; blockEngineUrl: string };
 }
 
 /** Body of POST /api/wallet/terminal/trade/review. */
@@ -187,6 +196,7 @@ export interface WalletTerminalTradeReviewRequest {
   /** SOL to spend for a buy, or token units to sell, as a decimal string. */
   amount: string;
   slippageBps: number;
+  sendRoute: WalletTerminalTradeSendRoute;
 }
 
 /** One side of a reviewed swap, in display units and base units. */
@@ -232,14 +242,20 @@ export interface WalletTerminalTradeReview {
   slippageBps: number;
   priceImpactPct: string | null;
   route: WalletTerminalTradeRouteLeg[];
-  fee: {
-    baseFeeLamports: number;
-    /** Priority fee the swap set, when Jupiter reported it. */
-    priorityFeeLamports: number | null;
-    maxPriorityFeeLamports: number;
-  };
-  /** Private or Jito routing for this trade; not set up today. */
-  privateRouting: { available: false; detail: string };
+  /** Fees beyond the swap itself; the second one depends on the send route. */
+  fee:
+    | {
+        route: "rpc";
+        baseFeeLamports: number;
+        /** Priority fee the swap set, when Jupiter reported it. */
+        priorityFeeLamports: number | null;
+        maxPriorityFeeLamports: number;
+      }
+    | { route: "jito"; baseFeeLamports: number; jitoTipLamports: number };
+  /** Where the signed transaction goes on confirm. */
+  sending:
+    | { route: "rpc"; detail: string }
+    | { route: "jito"; blockEngineUrl: string; detail: string };
   simulation: WalletTerminalTradeSimulation;
   /** False when the simulation failed; such a review cannot be confirmed. */
   canConfirm: boolean;
