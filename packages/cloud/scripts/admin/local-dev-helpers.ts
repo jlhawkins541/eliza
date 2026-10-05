@@ -1,12 +1,12 @@
 /**
- * Shared helpers for the cloud local-dev scripts: dotenv loading, .env file
+ * Shared helpers for the cloud local-dev scripts: native .env loading, .env file
  * parsing and in-place key updates, placeholder-value detection, and local JWT
  * signing-key generation. Consumed by sync-api-dev-vars and the seed scripts.
  */
 import crypto from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { config } from "dotenv";
+import { parseEnv } from "node:util";
 
 type EnvLoadSpec = string | { path: string; override?: boolean };
 
@@ -16,10 +16,14 @@ export function loadEnvFiles(
 ): void {
   for (const file of files) {
     const spec = typeof file === "string" ? { path: file } : file;
-    config({
-      path: path.resolve(cwd, spec.path),
-      ...(spec.override === undefined ? {} : { override: spec.override }),
-    });
+    const filePath = path.resolve(cwd, spec.path);
+    if (!existsSync(filePath)) continue;
+    for (const [key, value] of Object.entries(
+      parseEnv(readFileSync(filePath, "utf8")),
+    )) {
+      if (spec.override || process.env[key] === undefined)
+        process.env[key] = value;
+    }
   }
 }
 
