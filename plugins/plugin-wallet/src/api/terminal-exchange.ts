@@ -10,7 +10,8 @@
  * permission mode that lets a person trade and refuses requests marked as
  * agent automation, so an exchange order always rests on a person's tap. A
  * review is single-use and expires, and each order's value is capped by
- * `WALLET_TERMINAL_MAX_ORDER_USD`. The client order id is fixed at review, so
+ * `WALLET_TERMINAL_MAX_ORDER_USD`; a sell is valued at the market's best bid
+ * when that is above its limit, since that is roughly where it would fill. The client order id is fixed at review, so
  * a send whose answer was lost is recorded as `unknown` and can be looked up
  * on the venue instead of being placed twice. Orders placed in this process
  * are listed, refreshed and cancelled from an in-memory journal. Failures are
@@ -32,6 +33,13 @@ import type {
   WalletTerminalTradeSide,
 } from "../contracts.js";
 import { canUseLocalTradeExecution } from "../lib/server-wallet-trade.js";
+import {
+  compareDecimals,
+  isMultipleOf,
+  isPlainDecimal,
+  maxDecimal,
+  multiplyDecimals,
+} from "./decimal-strings.js";
 import {
   type ExchangeOrderIntent,
   ExchangeVenueError,
@@ -176,58 +184,28 @@ function invalid(message: string): ElizaError {
   return exchangeError("TERMINAL_EXCHANGE_INVALID_REQUEST", message);
 }
 
-// Exact decimal arithmetic on non-negative decimal strings.
-
-function scaled(value: string, scale: number): bigint {
-  const [whole, fraction = ""] = value.split(".");
-  return BigInt(`${whole}${fraction.padEnd(scale, "0")}`);
-}
-
-function scaleOf(...values: string[]): number {
-  return Math.max(...values.map((value) => (value.split(".")[1] ?? "").length));
-}
-
-/** Compare two decimal strings exactly. */
-export function compareDecimals(a: string, b: string): number {
-  const scale = scaleOf(a, b);
-  const left = scaled(a, scale);
-  const right = scaled(b, scale);
-  return left === right ? 0 : left < right ? -1 : 1;
-}
-
-/** Multiply two decimal strings exactly. */
-export function multiplyDecimals(a: string, b: string): string {
-  const scaleA = scaleOf(a);
-  const scaleB = scaleOf(b);
-  const product = scaled(a, scaleA) * scaled(b, scaleB);
-  const scale = scaleA + scaleB;
-  const digits = product.toString().padStart(scale + 1, "0");
-  const whole = digits.slice(0, digits.length - scale);
-  const fraction = digits.slice(digits.length - scale).replace(/0+$/, "");
-  return fraction ? `${whole}.${fraction}` : whole;
-}
-
-/** True when `value` is a whole multiple of `step`. */
-export function isMultipleOf(value: string, step: string): boolean {
-  const scale = scaleOf(value, step);
-  const divisor = scaled(step, scale);
-  return divisor > 0n && scaled(value, scale) % divisor === 0n;
-}
-
-function resolveMaxOrderUsd(runtime: IAgentRuntime): number {
+/** The per-order value cap, as a number for display and an exact decimal string. */
+function resolveMaxOrderUsd(runtime: IAgentRuntime): {
+  amount: number;
+  text: string;
+} {
   const raw = runtime.getSetting(TERMINAL_MAX_ORDER_USD_SETTING);
   if (raw === null || raw === undefined || raw === "") {
-    return DEFAULT_TERMINAL_MAX_ORDER_USD;
+    return {
+      amount: DEFAULT_TERMINAL_MAX_ORDER_USD,
+      text: String(DEFAULT_TERMINAL_MAX_ORDER_USD),
+    };
   }
-  const value = typeof raw === "number" ? raw : Number(String(raw).trim());
-  if (!Number.isFinite(value) || value <= 0) {
+  const text = String(raw).trim();
+  const amount = Number(text);
+  if (!DECIMAL_PATTERN.test(text) || !(amount > 0)) {
     throw exchangeError(
       "TERMINAL_EXCHANGE_LIMIT_INVALID",
-      `${TERMINAL_MAX_ORDER_USD_SETTING} must be a positive amount in USD.`,
-      { context: { value: String(raw) } },
+      `${TERMINAL_MAX_ORDER_USD_SETTING} must be a positive amount in USD, written like 100 or 250.50.`,
+      { context: { value: text } },
     );
   }
-  return value;
+  return { amount, text };
 }
 
 export function describeTerminalExchange(
@@ -245,7 +223,7 @@ export function describeTerminalExchange(
     venues: { kraken: venue("kraken"), okx: venue("okx") },
     bases: [...EXCHANGE_BASES],
     quotes: [...EXCHANGE_QUOTES],
-    maxOrderUsd: resolveMaxOrderUsd(agentRuntime),
+    maxOrderUsd: resolveMaxOrderUsd(agentRuntime).amount,
     reviewSeconds: TERMINAL_EXCHANGE_REVIEW_TTL_MS / 1000,
   };
 }
@@ -259,6 +237,16 @@ function oneOf<T extends string>(
     throw invalid(`${name} must be one of ${allowed.join(", ")}.`);
   }
   return value as T;
+}
+
+function assertWithinCap(value: string, quote: string, cap: string): void {
+  if (compareDecimals(value, cap) > 0) {
+    throw exchangeError(
+      "TERMINAL_EXCHANGE_REFUSED",
+      `This order is worth ${value} ${quote}, over the ${cap} USD limit per order (${TERMINAL_MAX_ORDER_USD_SETTING}).`,
+      { context: { orderValue: value, maxOrderUsd: cap } },
+    );
+  }
 }
 
 function positiveDecimal(value: unknown, name: string): string {
@@ -293,13 +281,7 @@ export async function reviewTerminalExchangeOrder(
 
   const orderValue = multiplyDecimals(quantity, price);
   const maxOrderUsd = resolveMaxOrderUsd(agentRuntime);
-  if (compareDecimals(orderValue, String(maxOrderUsd)) > 0) {
-    throw exchangeError(
-      "TERMINAL_EXCHANGE_REFUSED",
-      `This order is worth ${orderValue} ${quote}, over the ${maxOrderUsd} USD limit per order (${TERMINAL_MAX_ORDER_USD_SETTING}).`,
-      { context: { orderValue, maxOrderUsd } },
-    );
-  }
+  assertWithinCap(orderValue, quote, maxOrderUsd.text);
 
   const missing = missingVenueSettings(agentRuntime, venue);
   if (missing.length > 0) {
@@ -322,17 +304,38 @@ export async function reviewTerminalExchangeOrder(
   const checks: WalletExchangeReviewCheck[] = [];
   let validated: Awaited<ReturnType<typeof client.validateOrder>>;
   let available: string;
+  let bid: string | null = null;
   const spendCurrency = side === "buy" ? quote : base;
   const spendAmount = side === "buy" ? orderValue : quantity;
   try {
     validated = await client.validateOrder(intent);
     available = await client.availableBalance(spendCurrency);
+    // A sell limit under the market fills at the bid, so its real value is
+    // quantity x max(limit, bid); the limit alone would let a low limit
+    // sell far more than the cap.
+    if (side === "sell") bid = await client.bestBid(intent);
   } catch (error) {
     // error-policy:J2 venue failures become typed terminal exchange errors.
     fromVenueError(error, venue);
   }
 
   const { rules } = validated;
+  for (const step of [
+    rules.quantityStep,
+    rules.priceStep,
+    rules.minimumQuantity,
+    bid,
+  ]) {
+    if (step !== null && !isPlainDecimal(step)) {
+      throw exchangeError(
+        "TERMINAL_EXCHANGE_UPSTREAM_FAILED",
+        `${VENUE_NAME[venue]} reported a market value the terminal can't read (${step}).`,
+      );
+    }
+  }
+  const sellValue =
+    bid === null ? null : multiplyDecimals(quantity, maxDecimal(price, bid));
+  if (sellValue !== null) assertWithinCap(sellValue, quote, maxOrderUsd.text);
   if (rules.quantityStep && !isMultipleOf(quantity, rules.quantityStep)) {
     throw exchangeError(
       "TERMINAL_EXCHANGE_REFUSED",
@@ -374,6 +377,15 @@ export async function reviewTerminalExchangeOrder(
         ? `Kraken accepted it in validate-only mode: ${validated.description}`
         : `${rules.market} is live; quantity step ${rules.quantityStep ?? "not reported"}, price step ${rules.priceStep ?? "not reported"}, minimum ${rules.minimumQuantity ?? "not reported"} ${base}.`,
   });
+  if (bid !== null && sellValue !== null) {
+    checks.push({
+      label: "Market bid",
+      detail:
+        compareDecimals(price, bid) < 0
+          ? `${VENUE_NAME[venue]}'s best bid is ${bid} ${quote}, above your limit, so this sell would fill at about ${bid}: worth about ${sellValue} ${quote}.`
+          : `${VENUE_NAME[venue]}'s best bid is ${bid} ${quote}; your limit is at or above it.`,
+    });
+  }
   checks.push({
     label: "Funds",
     detail: `${available} ${spendCurrency} available; this order holds ${spendAmount}.`,

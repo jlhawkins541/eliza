@@ -215,6 +215,10 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 let trade: TerminalTradeHarness | null = null;
 let exchange: TerminalExchangeHarness | null = null;
+// Lose the next execute answer after the server handled it.
+let loseNextExecuteAnswer = false;
+// Fail every order-list request.
+let failOrdersList = false;
 
 // Exchange calls go through the real wallet routes in the exchange harness,
 // sharing the trade harness's permission config.
@@ -226,11 +230,18 @@ async function viaExchangeRoute(path: string, init?: RequestInit) {
       ? (JSON.parse(init.body) as Record<string, unknown>)
       : undefined;
   routeCalls.push(path);
+  if (failOrdersList && path.endsWith("/exchange/orders")) {
+    throw new Error("Network error");
+  }
   const res = await exchange.request(
     init?.method === "POST" ? "POST" : "GET",
     path,
     body,
   );
+  if (loseNextExecuteAnswer && path.endsWith("/exchange/execute")) {
+    loseNextExecuteAnswer = false;
+    throw new Error("Network error");
+  }
   if (res.status !== 200) {
     throw new Error(String(res.body.error ?? `HTTP ${res.status}`));
   }
@@ -329,6 +340,8 @@ beforeEach(() => {
   routeCalls = [];
   trade = null;
   exchange = null;
+  loseNextExecuteAnswer = false;
+  failOrdersList = false;
   __resetTerminalTradesForTests();
   __resetTerminalExchangeForTests();
   routeClient.fetch = viaRoute;
@@ -836,6 +849,42 @@ describe("CryptoTerminalView", () => {
       fireEvent.click(await screen.findByTestId("exchange-cancel-confirm"));
       await screen.findByText(/Canceled/);
       expect(exchange?.orders[0]?.state).toBe("canceled");
+    });
+
+    it("shows a placed order whose answer was lost and asks for a fresh review", async () => {
+      trade = await createTerminalTradeHarness();
+      render(<CryptoTerminalView />);
+      await openRealTrade();
+      const panel = await screen.findByTestId("exchange-panel");
+      fireEvent.change(within(panel).getByTestId("exchange-quantity"), {
+        target: { value: "0.5" },
+      });
+      fireEvent.change(within(panel).getByTestId("exchange-price"), {
+        target: { value: "140.25" },
+      });
+      fireEvent.click(within(panel).getByTestId("exchange-review"));
+      await screen.findByTestId("exchange-review-order");
+      loseNextExecuteAnswer = true;
+      fireEvent.click(screen.getByTestId("exchange-confirm"));
+      expect(
+        (await screen.findByTestId("exchange-send-error")).textContent,
+      ).toContain("Check this session's orders below");
+      expect(screen.queryByTestId("exchange-confirm")).toBeNull();
+      expect(screen.getByTestId("exchange-review-again")).toBeTruthy();
+      expect(exchange?.orders).toHaveLength(1);
+      const orders = await screen.findByTestId("exchange-orders");
+      expect(orders.textContent).toContain("Kraken · buy 0.5 SOLUSD at 140.25");
+    });
+
+    it("says the order list failed to load instead of showing it empty", async () => {
+      trade = await createTerminalTradeHarness();
+      failOrdersList = true;
+      render(<CryptoTerminalView />);
+      await openRealTrade();
+      expect(
+        (await screen.findByTestId("exchange-orders-error")).textContent,
+      ).toContain("Couldn't load this session's exchange orders");
+      expect(screen.queryByTestId("exchange-orders-empty")).toBeNull();
     });
 
     it("names the settings a venue still needs instead of offering its ticket", async () => {

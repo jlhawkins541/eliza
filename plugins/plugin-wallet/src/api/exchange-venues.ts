@@ -21,6 +21,7 @@ import type {
   WalletExchangeVenue,
   WalletTerminalTradeSide,
 } from "../contracts.js";
+import { isPlainDecimal, subtractDecimalsFloor } from "./decimal-strings.js";
 
 export const KRAKEN_API_URL = "https://api.kraken.com";
 export const DEFAULT_OKX_API_URL = "https://www.okx.com";
@@ -90,6 +91,8 @@ export interface ExchangeVenueClient {
   ): Promise<{ rules: ExchangeMarketRules; description: string }>;
   /** Available (not held) balance of one currency, as a decimal string. */
   availableBalance(currency: string): Promise<string>;
+  /** The market's best bid, as a decimal string. */
+  bestBid(intent: Pick<ExchangeOrderIntent, "base" | "quote">): Promise<string>;
   placeOrder(intent: ExchangeOrderIntent): Promise<{ orderId: string }>;
   readOrder(
     intent: ExchangeOrderIntent,
@@ -205,6 +208,17 @@ const KRAKEN_BALANCE_KEYS: Record<string, string[]> = {
   PYUSD: ["PYUSD"],
 };
 
+/**
+ * Kraken errors that mean "no reliable answer", not "no": the order may still
+ * have been accepted, so they are treated as unreachable, never as refused.
+ */
+const KRAKEN_TRANSIENT_ERRORS = [
+  "EService:Unavailable",
+  "EService:Busy",
+  "EService:Deadline elapsed",
+  "EGeneral:Internal error",
+];
+
 let lastKrakenNonce = 0n;
 
 function nextKrakenNonce(): string {
@@ -257,9 +271,13 @@ export function krakenClient(runtime: IAgentRuntime): ExchangeVenueClient {
       );
     }
     if (answer.error.length > 0) {
+      const errors = answer.error.map(String);
+      const transient = errors.some((error) =>
+        KRAKEN_TRANSIENT_ERRORS.some((prefix) => error.startsWith(prefix)),
+      );
       throw new ExchangeVenueError(
-        "refused",
-        `Kraken: ${answer.error.map(String).join("; ")}`,
+        transient ? "unreachable" : "refused",
+        `Kraken: ${errors.join("; ")}`,
       );
     }
     if (!isObject(answer.result)) {
@@ -305,12 +323,47 @@ export function krakenClient(runtime: IAgentRuntime): ExchangeVenueClient {
       };
     },
     async availableBalance(currency) {
-      const result = await privateCall("Balance", {});
+      // BalanceEx, unlike Balance, reports what open orders already hold.
+      const result = await privateCall("BalanceEx", {});
       for (const key of KRAKEN_BALANCE_KEYS[currency] ?? [currency]) {
-        const value = result[key];
-        if (typeof value === "string") return value;
+        const entry = result[key];
+        if (!isObject(entry)) continue;
+        const balance = entry.balance;
+        const held = entry.hold_trade ?? "0";
+        if (
+          typeof balance !== "string" ||
+          typeof held !== "string" ||
+          !isPlainDecimal(balance) ||
+          !isPlainDecimal(held)
+        ) {
+          throw new ExchangeVenueError(
+            "unreachable",
+            `Kraken reported a ${currency} balance the terminal can't read.`,
+          );
+        }
+        return subtractDecimalsFloor(balance, held);
       }
       return "0";
+    },
+    async bestBid(intent) {
+      const answer = await send(
+        runtime,
+        "Kraken",
+        `${KRAKEN_API_URL}/0/public/Ticker?pair=${encodeURIComponent(marketName(intent))}`,
+        { method: "GET" },
+      );
+      const result =
+        isObject(answer) && isObject(answer.result) ? answer.result : null;
+      const ticker = result ? Object.values(result)[0] : null;
+      const bid =
+        isObject(ticker) && Array.isArray(ticker.b) ? ticker.b[0] : null;
+      if (typeof bid !== "string") {
+        throw new ExchangeVenueError(
+          "unreachable",
+          `Kraken returned no bid for ${marketName(intent)}.`,
+        );
+      }
+      return bid;
     },
     async placeOrder(intent) {
       const result = await privateCall("AddOrder", orderParams(intent));
@@ -328,7 +381,16 @@ export function krakenClient(runtime: IAgentRuntime): ExchangeVenueClient {
         const open = await privateCall("OpenOrders", {
           cl_ord_id: intent.clientOrderId,
         });
-        const found = isObject(open.open) ? Object.keys(open.open)[0] : null;
+        let found = isObject(open.open) ? Object.keys(open.open)[0] : null;
+        if (!found) {
+          // A lost order may already have filled or been cancelled.
+          const closed = await privateCall("ClosedOrders", {
+            cl_ord_id: intent.clientOrderId,
+          });
+          found = isObject(closed.closed)
+            ? (Object.keys(closed.closed)[0] ?? null)
+            : null;
+        }
         if (!found) {
           return { orderId: null, state: "unknown", filledQuantity: null };
         }
@@ -419,6 +481,13 @@ export function resolveOkxApiUrl(runtime: IAgentRuntime): string {
   return parsed.origin;
 }
 
+/**
+ * OKX codes that mean "no reliable answer", not "no" (service unavailable,
+ * request timeout, system busy, system error): the order may still exist, so
+ * they are treated as unreachable, never as refused.
+ */
+const OKX_TRANSIENT_CODES = new Set(["50001", "50004", "50013", "50026"]);
+
 export function okxClient(runtime: IAgentRuntime): ExchangeVenueClient {
   async function call(
     method: "GET" | "POST",
@@ -474,7 +543,14 @@ export function okxClient(runtime: IAgentRuntime): ExchangeVenueClient {
         (failedRow && typeof failedRow.sMsg === "string" && failedRow.sMsg) ||
         (typeof answer.msg === "string" && answer.msg) ||
         `code ${String(answer.code)}`;
-      throw new ExchangeVenueError("refused", `OKX: ${reason}`);
+      const transient =
+        OKX_TRANSIENT_CODES.has(String(answer.code)) ||
+        (failedRow !== undefined &&
+          OKX_TRANSIENT_CODES.has(String(failedRow.sCode)));
+      throw new ExchangeVenueError(
+        transient ? "unreachable" : "refused",
+        `OKX: ${reason}`,
+      );
     }
     return rows;
   }
@@ -525,6 +601,20 @@ export function okxClient(runtime: IAgentRuntime): ExchangeVenueClient {
         }
       }
       return "0";
+    },
+    async bestBid(intent) {
+      const rows = await call("GET", "/api/v5/market/ticker", {
+        query: { instId: marketName(intent) },
+        signed: false,
+      });
+      const bid = rows[0]?.bidPx;
+      if (typeof bid !== "string" || bid === "") {
+        throw new ExchangeVenueError(
+          "unreachable",
+          `OKX returned no bid for ${marketName(intent)}.`,
+        );
+      }
+      return bid;
     },
     async placeOrder(intent) {
       const rows = await call("POST", "/api/v5/trade/order", {

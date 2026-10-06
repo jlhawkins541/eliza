@@ -266,12 +266,20 @@ describe("resolveTerminalMcpTarget", () => {
         fetcher,
       ).baseUrl,
     ).toBe("https://agent.example:8443");
+    expect(
+      resolveTerminalMcpTarget(
+        { ELIZA_TERMINAL_MCP_URL: "http://localhost:2138" },
+        fetcher,
+      ).baseUrl,
+    ).toBe("http://localhost:2138");
     for (const value of [
       "not a url",
       "ftp://agent.example",
       "https://user:pass@agent.example",
       "https://agent.example/api",
       "https://agent.example/?x=1",
+      "http://agent.example:2138",
+      "http://192.168.1.20:2138",
     ]) {
       expect(() =>
         resolveTerminalMcpTarget({ ELIZA_TERMINAL_MCP_URL: value }, fetcher),

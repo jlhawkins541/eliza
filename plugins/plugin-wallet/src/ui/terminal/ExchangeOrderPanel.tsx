@@ -185,8 +185,13 @@ function ExchangeReviewDialog({
               </p>
             )}
             {error ? (
-              <p role="alert" className="text-xs text-danger">
-                {error}
+              <p
+                role="alert"
+                className="text-xs text-danger"
+                data-testid="exchange-send-error"
+              >
+                {error} Check this session's orders below before reviewing
+                again.
               </p>
             ) : null}
           </div>
@@ -195,8 +200,10 @@ function ExchangeReviewDialog({
           <Button variant="outline" onClick={onClose}>
             {placed ? "Done" : "Cancel"}
           </Button>
-          {placed ? null : expired ? (
-            <Button onClick={onReviewAgain}>Review again</Button>
+          {placed ? null : expired || error ? (
+            <Button onClick={onReviewAgain} data-testid="exchange-review-again">
+              Review again
+            </Button>
           ) : (
             <Button
               onClick={onConfirm}
@@ -395,6 +402,22 @@ function OrderList({ exchange }: { exchange: ExchangeTradingHandle }) {
   const [cancelling, setCancelling] = useState<WalletExchangeOrder | null>(
     null,
   );
+  if (exchange.ordersError !== null) {
+    return (
+      <div className="flex flex-col items-start gap-2">
+        <p
+          role="alert"
+          className="text-xs text-danger"
+          data-testid="exchange-orders-error"
+        >
+          Couldn't load this session's exchange orders: {exchange.ordersError}
+        </p>
+        <Button variant="outline" size="sm" onClick={exchange.refresh}>
+          <RefreshCw className="size-3.5" /> Try again
+        </Button>
+      </div>
+    );
+  }
   if (exchange.orders.length === 0) {
     return (
       <p className="text-xs text-muted" data-testid="exchange-orders-empty">

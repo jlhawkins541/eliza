@@ -27,9 +27,6 @@ export const THIN_LIQUIDITY_USD = 10_000;
 /** Pools younger than this add a caution beside the verdict. */
 export const NEW_POOL_AGE_MS = 24 * 60 * 60 * 1000;
 
-/** Most pairs kept per mint, strongest liquidity first. */
-export const MAX_PAIRS = 5;
-
 /** Base58 Solana mint addresses, the only input this client accepts. */
 export const SOLANA_MINT_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
@@ -129,8 +126,8 @@ function liquidityOf(pair: WalletTokenPair): number {
 }
 
 /**
- * Sort the parsed pairs by liquidity, keep the strongest {@link MAX_PAIRS}, and
- * derive the totals and cautions the terminal shows beside them.
+ * Sort every parsed pair by liquidity and derive the totals and cautions the
+ * terminal shows beside them. No pair is dropped: the list is model context.
  */
 export function summarizePairs(
   mint: string,
@@ -142,9 +139,7 @@ export function summarizePairs(
   if (pairs.length === 0) {
     return { status: "no-pairs", mint, checkedAt, stale: false, source };
   }
-  const ranked = [...pairs]
-    .sort((a, b) => liquidityOf(b) - liquidityOf(a))
-    .slice(0, MAX_PAIRS);
+  const ranked = [...pairs].sort((a, b) => liquidityOf(b) - liquidityOf(a));
   const totalLiquidityUsd = pairs.reduce(
     (total, pair) => total + liquidityOf(pair),
     0,
@@ -166,6 +161,9 @@ export function summarizePairs(
   const newPool =
     oldestPairCreatedAt !== null &&
     now.getTime() - Date.parse(oldestPairCreatedAt) < NEW_POOL_AGE_MS;
+  // A pool with no reported age could be minutes old, so it is not assumed
+  // safe; an unknown age on every pool adds the same caution as a new pool.
+  const poolAgeUnknown = oldestPairCreatedAt === null;
   return {
     status: "found",
     mint,
@@ -179,7 +177,8 @@ export function summarizePairs(
     oldestPairCreatedAt,
     thinLiquidity,
     newPool,
-    addsCaution: thinLiquidity || newPool,
+    poolAgeUnknown,
+    addsCaution: thinLiquidity || newPool || poolAgeUnknown,
   };
 }
 
@@ -299,6 +298,11 @@ export function formatTokenPairs(
   if (response.newPool) {
     lines.push(
       "CAUTION: the oldest pool is less than a day old. New pools are where rug pulls happen.",
+    );
+  }
+  if (response.poolAgeUnknown) {
+    lines.push(
+      "CAUTION: DexScreener reports no creation time for any pool, so it may be brand new.",
     );
   }
   lines.push(

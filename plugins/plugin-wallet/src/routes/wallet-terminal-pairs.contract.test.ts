@@ -11,7 +11,7 @@ import type http from "node:http";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  MAX_PAIRS,
+  formatTokenPairs,
   summarizePairs,
   THIN_LIQUIDITY_USD,
 } from "../analytics/dexscreener/pairs";
@@ -58,7 +58,11 @@ function installFetch(
   return calls;
 }
 
-async function call(url: string, method = "GET") {
+async function call(
+  url: string,
+  method = "GET",
+  from: { remoteAddress?: string; headers?: Record<string, string> } = {},
+) {
   const res = {
     statusCode: 0,
     body: "",
@@ -78,8 +82,8 @@ async function call(url: string, method = "GET") {
     {
       method,
       url,
-      headers: {},
-      socket: { remoteAddress: "127.0.0.1" },
+      headers: from.headers ?? {},
+      socket: { remoteAddress: from.remoteAddress ?? "127.0.0.1" },
     } as unknown as http.IncomingMessage,
     res as unknown as http.ServerResponse,
   );
@@ -131,20 +135,28 @@ describe("summarizePairs", () => {
     });
   });
 
-  it("ranks pairs deepest first and keeps at most MAX_PAIRS", () => {
-    const pairs = Array.from({ length: MAX_PAIRS + 3 }, (_, index) =>
-      pair({ pairAddress: `pair-${index}`, liquidityUsd: index * 1_000 }),
+  it("ranks every pair deepest first without dropping any", () => {
+    const pairs = Array.from({ length: 40 }, (_, index) =>
+      pair({
+        pairAddress: `pair-${index}`,
+        baseSymbol: `T${index}`,
+        liquidityUsd: index * 1_000,
+      }),
     );
     const summary = summarizePairs(MINT, pairs, now);
     if (summary.status !== "found") throw new Error("expected found");
-    expect(summary.pairs).toHaveLength(MAX_PAIRS);
-    expect(summary.pairCount).toBe(MAX_PAIRS + 3);
+    expect(summary.pairs).toHaveLength(40);
+    expect(summary.pairCount).toBe(40);
+    const text = formatTokenPairs(summary, now);
+    for (let index = 0; index < 40; index += 1) {
+      expect(text).toContain(`- T${index}/`);
+    }
     expect(summary.pairs.map((entry) => entry.liquidityUsd)).toEqual(
       [...summary.pairs]
         .map((entry) => entry.liquidityUsd)
         .sort((a, b) => (b ?? 0) - (a ?? 0)),
     );
-    expect(summary.pairs[0]?.pairAddress).toBe(`pair-${MAX_PAIRS + 2}`);
+    expect(summary.pairs[0]?.pairAddress).toBe("pair-39");
   });
 
   it("totals every reported pair, not only the ranked ones", () => {
@@ -196,6 +208,24 @@ describe("summarizePairs", () => {
     });
     expect(summary.oldestPairCreatedAt).toBe(
       new Date(now.getTime() - 3_600_000).toISOString(),
+    );
+  });
+
+  it("cautions when no pool reports its age", () => {
+    const summary = summarizePairs(
+      MINT,
+      [pair({ liquidityUsd: 500_000, pairCreatedAt: null })],
+      now,
+    );
+    if (summary.status !== "found") throw new Error("expected found");
+    expect(summary).toMatchObject({
+      oldestPairCreatedAt: null,
+      newPool: false,
+      poolAgeUnknown: true,
+      addsCaution: true,
+    });
+    expect(formatTokenPairs(summary, now)).toContain(
+      "no creation time for any pool",
     );
   });
 
@@ -397,5 +427,62 @@ describe("terminal pairs route", () => {
     );
     expect(res.statusCode).toBe(429);
     expect(res.headers["Retry-After"]).toBeDefined();
+    expect(res.headers["Cache-Control"]).toBe("no-store");
+  });
+
+  it("ignores a forwarded address a remote caller made up", async () => {
+    installFetch(() => jsonResponse([]));
+    const remote = (index: number) => ({
+      remoteAddress: "203.0.113.7",
+      headers: { "x-forwarded-for": `198.51.100.${index}` },
+    });
+    for (let index = 0; index < 40; index += 1) {
+      await call(
+        path(`Mint${index}1111111111111111111111111111111111`),
+        "GET",
+        remote(index),
+      );
+    }
+    const { res } = await call(
+      path("ZzZz1111111111111111111111111111111111111"),
+      "GET",
+      remote(99),
+    );
+    expect(res.statusCode).toBe(429);
+  });
+
+  it("counts each client behind the local proxy separately", async () => {
+    installFetch(() => jsonResponse([]));
+    for (let index = 0; index < 40; index += 1) {
+      await call(
+        path(`Mint${index}1111111111111111111111111111111111`),
+        "GET",
+        {
+          headers: { "x-forwarded-for": "198.51.100.1" },
+        },
+      );
+    }
+    const { res } = await call(
+      path("ZzZz1111111111111111111111111111111111111"),
+      "GET",
+      { headers: { "x-forwarded-for": "198.51.100.2" } },
+    );
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["Cache-Control"]).toBe("public, max-age=30");
+  });
+
+  it("does not let the browser cache a stale answer", async () => {
+    let fail = false;
+    installFetch(() =>
+      fail
+        ? new Response("down", { status: 500 })
+        : jsonResponse(sample.dexscreener),
+    );
+    await call(path(MINT));
+    __expireWalletTerminalPairsCacheForTests();
+    fail = true;
+    const { res } = await call(path(MINT));
+    expect(res.json<WalletTerminalTokenPairsResponse>().stale).toBe(true);
+    expect(res.headers["Cache-Control"]).toBe("no-store");
   });
 });

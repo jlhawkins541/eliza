@@ -264,9 +264,9 @@ export type WalletTerminalTokenPairsResponse =
       checkedAt: string;
       stale: boolean;
       source: WalletTokenPairsSource;
-      /** The strongest pairs by liquidity, deepest first. */
+      /** Every pair DexScreener reported, deepest liquidity first. */
       pairs: WalletTokenPair[];
-      /** How many pairs DexScreener reported, before the list was trimmed. */
+      /** How many pairs DexScreener reported. */
       pairCount: number;
       totalLiquidityUsd: number;
       totalVolume24hUsd: number;
@@ -274,8 +274,10 @@ export type WalletTerminalTokenPairsResponse =
       oldestPairCreatedAt: string | null;
       thinLiquidity: boolean;
       newPool: boolean;
+      /** True when no pool reports a creation time, so none can be aged. */
+      poolAgeUnknown: boolean;
       /**
-       * True when thin liquidity or a new pool warrants a caution beside the
+       * True when thin liquidity, a new pool or an unknown pool age warrants a caution beside the
        * GoPlus verdict. It never clears or replaces that verdict.
        */
       addsCaution: boolean;

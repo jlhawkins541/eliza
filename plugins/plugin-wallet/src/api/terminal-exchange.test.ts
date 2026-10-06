@@ -6,8 +6,9 @@
  * the person-only gate, request validation, the order-value cap, venue checks
  * (Kraken validate-only, OKX steps and minimum), funds, single-use and expiring
  * reviews, placing exactly the reviewed order, a refused send, a lost send
- * recorded as unknown and found again by client order id, refresh, cancel,
- * and exact decimal math.
+ * recorded as unknown and found again by client order id, venue errors that
+ * mean "no answer" kept unknown, sells valued at the market bid, funds held by
+ * open orders, refresh, cancel, and exact decimal math.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -15,11 +16,13 @@ import {
   type TerminalExchangeHarness,
 } from "./__tests__/terminal-exchange-harness";
 import {
-  __resetTerminalExchangeForTests,
   compareDecimals,
+  DecimalStringError,
   isMultipleOf,
   multiplyDecimals,
-} from "./terminal-exchange";
+  subtractDecimalsFloor,
+} from "./decimal-strings";
+import { __resetTerminalExchangeForTests } from "./terminal-exchange";
 
 const STATUS = "/api/wallet/terminal/exchange/status";
 const REVIEW = "/api/wallet/terminal/exchange/review";
@@ -119,12 +122,12 @@ describe("terminal exchange review", () => {
       },
       {
         label: "Funds",
-        detail: "500.0000 USD available; this order holds 70.125.",
+        detail: "500 USD available; this order holds 70.125.",
       },
     ]);
     expect(harness.calls.map((call) => call.method)).toEqual([
       "AddOrder",
-      "Balance",
+      "BalanceEx",
     ]);
     expect(harness.calls[0]?.params).toMatchObject({
       pair: "SOLUSD",
@@ -155,8 +158,65 @@ describe("terminal exchange review", () => {
         detail:
           "SOL-USD is live; quantity step 0.0001, price step 0.01, minimum 0.01 SOL.",
       },
+      {
+        label: "Market bid",
+        detail:
+          "OKX's best bid is 150.00 USD, above your limit, so this sell would fill at about 150.00: worth about 187.5 USD.",
+      },
       { label: "Funds", detail: "3 SOL available; this order holds 1.25." },
     ]);
+  });
+
+  it.each([
+    ["kraken", "SOLUSD"],
+    ["okx", "SOL-USD"],
+  ])(
+    "values a low %s sell limit at the market bid against the cap",
+    async (venue) => {
+      const harness = createTerminalExchangeHarness();
+      // 2 SOL at a 0.01 limit is "worth" 0.02, but it would fill near the
+      // 150 bid: about 300 USD, over the default 100 cap.
+      const { status, body } = await review(harness, {
+        ...krakenBuy,
+        venue,
+        side: "sell",
+        quantity: "2",
+        price: "0.01",
+      });
+      expect(status).toBe(422);
+      expect(body.error).toContain("worth 300 USD, over the 100 USD limit");
+      expect(harness.orders).toHaveLength(0);
+    },
+  );
+
+  it("counts Kraken funds already held by open orders as unavailable", async () => {
+    const harness = createTerminalExchangeHarness();
+    harness.krakenHeld.ZUSD = "450.0000";
+    const { status, body } = await review(harness, krakenBuy);
+    expect(status).toBe(422);
+    expect(body.error).toBe(
+      "Kraken shows 50 USD available; this order needs 70.125.",
+    );
+  });
+
+  it("reports a venue step it can't read instead of crashing", async () => {
+    const harness = createTerminalExchangeHarness();
+    harness.bids.okx = "1.5e2";
+    const { status, body } = await review(harness, {
+      ...okxBuy,
+      side: "sell",
+    });
+    expect(status).toBe(502);
+    expect(body.error).toContain("can't read (1.5e2)");
+  });
+
+  it("accepts a tiny order-value cap written out in full", async () => {
+    const harness = createTerminalExchangeHarness({
+      settings: { WALLET_TERMINAL_MAX_ORDER_USD: "0.0000001" },
+    });
+    const { status, body } = await review(harness, krakenBuy);
+    expect(status).toBe(422);
+    expect(body.error).toContain("over the 0.0000001 USD limit");
   });
 
   it.each([
@@ -199,13 +259,17 @@ describe("terminal exchange review", () => {
     expect(harness.calls).toHaveLength(0);
   });
 
-  it("reports an invalid order-value cap instead of using a default", async () => {
-    const harness = createTerminalExchangeHarness({
-      settings: { WALLET_TERMINAL_MAX_ORDER_USD: "lots" },
-    });
-    const { status } = await review(harness, krakenBuy);
-    expect(status).toBe(500);
-  });
+  it.each(["lots", "1e-7", "-5", "0"])(
+    "reports an invalid order-value cap %s instead of using a default",
+    async (cap) => {
+      const harness = createTerminalExchangeHarness({
+        settings: { WALLET_TERMINAL_MAX_ORDER_USD: cap },
+      });
+      const { status, body } = await review(harness, krakenBuy);
+      expect(status).toBe(500);
+      expect(body.error).toContain("must be a positive amount in USD");
+    },
+  );
 
   it("names the missing settings for an unconfigured venue", async () => {
     const harness = createTerminalExchangeHarness({
@@ -385,6 +449,73 @@ describe("terminal exchange execute", () => {
     });
   });
 
+  it.each([
+    ["EService:Unavailable"],
+    ["EService:Busy"],
+    ["EGeneral:Internal error"],
+  ])("records a Kraken %s answer as unknown, not rejected", async (error) => {
+    const harness = createTerminalExchangeHarness();
+    const reviewed = (await review(harness, krakenBuy)).body;
+    harness.krakenErrors = [error];
+    const placed = await harness.request("POST", EXECUTE, {
+      reviewId: reviewed.reviewId,
+      confirm: true,
+    });
+    expect(placed.body).toMatchObject({ state: "unknown", orderId: null });
+    expect(placed.body.detail).toContain("before placing another");
+  });
+
+  it.each(["50001", "50004", "50013", "50026"])(
+    "records an OKX %s answer as unknown, not rejected",
+    async (code) => {
+      const harness = createTerminalExchangeHarness();
+      const reviewed = (await review(harness, okxBuy)).body;
+      harness.okxPlaceCode = code;
+      const placed = await harness.request("POST", EXECUTE, {
+        reviewId: reviewed.reviewId,
+        confirm: true,
+      });
+      expect(placed.body).toMatchObject({ state: "unknown", orderId: null });
+    },
+  );
+
+  it("records an OKX parameter error as rejected", async () => {
+    const harness = createTerminalExchangeHarness();
+    const reviewed = (await review(harness, okxBuy)).body;
+    harness.okxPlaceCode = "51008";
+    const placed = await harness.request("POST", EXECUTE, {
+      reviewId: reviewed.reviewId,
+      confirm: true,
+    });
+    expect(placed.body).toMatchObject({
+      state: "rejected",
+      detail: "OKX: error 51008",
+    });
+  });
+
+  it("finds a lost Kraken order that already filled", async () => {
+    const harness = createTerminalExchangeHarness();
+    const reviewed = (await review(harness, krakenBuy)).body;
+    harness.dropNextPlacement = true;
+    await harness.request("POST", EXECUTE, {
+      reviewId: reviewed.reviewId,
+      confirm: true,
+    });
+    const [order] = harness.orders;
+    if (!order) throw new Error("expected the dropped order on Kraken");
+    order.state = "filled";
+    order.filled = order.quantity;
+    const refreshed = await harness.request("POST", REFRESH, {
+      clientOrderId: reviewed.clientOrderId,
+    });
+    expect(refreshed.body).toMatchObject({
+      state: "filled",
+      orderId: order.orderId,
+      filledQuantity: "0.5",
+    });
+    expect(harness.calls.map((call) => call.method)).toContain("ClosedOrders");
+  });
+
   it("keeps a lost OKX send unknown when OKX has no such order", async () => {
     const harness = createTerminalExchangeHarness();
     const reviewed = (await review(harness, okxBuy)).body;
@@ -472,5 +603,14 @@ describe("exact decimal math", () => {
     expect(isMultipleOf("0.3", "0.1")).toBe(true);
     expect(isMultipleOf("0.00005", "0.0001")).toBe(false);
     expect(isMultipleOf("1", "0")).toBe(false);
+    expect(subtractDecimalsFloor("500.0000", "450.25")).toBe("49.75");
+    expect(subtractDecimalsFloor("1", "2")).toBe("0");
+  });
+
+  it("rejects exponents, signs and blanks instead of misreading them", () => {
+    for (const value of ["1e-7", "1e21", "-1", "", " 1", "0x10"]) {
+      expect(() => compareDecimals("1", value)).toThrow(DecimalStringError);
+    }
+    expect(() => isMultipleOf("0.00002", "1e-5")).toThrow(DecimalStringError);
   });
 });

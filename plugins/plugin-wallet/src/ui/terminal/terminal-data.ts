@@ -849,6 +849,8 @@ export interface ExchangeTradingHandle {
   state: ExchangeTradingState;
   /** Orders placed from this terminal session, newest first. */
   orders: WalletExchangeOrder[];
+  /** Why the order list couldn't be loaded, or null when it is current. */
+  ordersError: string | null;
   refresh: () => void;
   review: (
     request: WalletTerminalExchangeReviewRequest,
@@ -868,12 +870,28 @@ export function useExchangeTrading(): ExchangeTradingHandle {
     status: "loading",
   });
   const [orders, setOrders] = useState<WalletExchangeOrder[]>([]);
+  const [ordersError, setOrdersError] = useState<string | null>(null);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
     };
+  }, []);
+
+  const loadOrders = useCallback(async () => {
+    const listed = await attempt(() =>
+      client.fetch<WalletTerminalExchangeOrdersResponse>(
+        "/api/wallet/terminal/exchange/orders",
+      ),
+    );
+    if (!mounted.current) return;
+    if (listed.ok) {
+      setOrders(listed.value.orders);
+      setOrdersError(null);
+    } else {
+      setOrdersError(listed.message);
+    }
   }, []);
 
   const load = useCallback(async () => {
@@ -888,15 +906,8 @@ export function useExchangeTrading(): ExchangeTradingHandle {
         ? { status: "ready", data: next.value }
         : { status: "error", message: next.message },
     );
-    if (next.ok && next.value.realTradingEnabled) {
-      const listed = await attempt(() =>
-        client.fetch<WalletTerminalExchangeOrdersResponse>(
-          "/api/wallet/terminal/exchange/orders",
-        ),
-      );
-      if (mounted.current && listed.ok) setOrders(listed.value.orders);
-    }
-  }, []);
+    if (next.ok && next.value.realTradingEnabled) await loadOrders();
+  }, [loadOrders]);
 
   useEffect(() => {
     void load();
@@ -942,12 +953,17 @@ export function useExchangeTrading(): ExchangeTradingHandle {
   );
 
   const execute = useCallback(
-    (reviewId: string) =>
-      withOrder("/api/wallet/terminal/exchange/execute", {
+    async (reviewId: string) => {
+      const outcome = await withOrder("/api/wallet/terminal/exchange/execute", {
         reviewId,
         confirm: true,
-      }),
-    [withOrder],
+      });
+      // The answer may have been lost after the server journaled the order,
+      // so reload the list rather than leave a placed order out of view.
+      if (!outcome.ok) await loadOrders();
+      return outcome;
+    },
+    [withOrder, loadOrders],
   );
   const refreshOrder = useCallback(
     (clientOrderId: string) =>
@@ -966,6 +982,7 @@ export function useExchangeTrading(): ExchangeTradingHandle {
   return {
     state,
     orders,
+    ordersError,
     refresh,
     review,
     execute,

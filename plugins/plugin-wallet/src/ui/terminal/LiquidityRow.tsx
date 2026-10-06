@@ -66,6 +66,7 @@ function cautionText(
   if (data.thinLiquidity)
     reasons.push("liquidity is thin, so a trade will move the price");
   if (data.newPool) reasons.push("the oldest pool is less than a day old");
+  if (data.poolAgeUnknown) reasons.push("no pool reports its age");
   if (reasons.length === 0) return null;
   return `Caution: ${reasons.join(" and ")}. This adds caution and never clears a GoPlus flag.`;
 }

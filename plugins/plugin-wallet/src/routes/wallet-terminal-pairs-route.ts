@@ -73,11 +73,20 @@ function loadPairs(mint: string): Promise<WalletTerminalTokenPairsResponse> {
   return pending;
 }
 
+const LOOPBACK_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+
+/**
+ * The address the refresh limit counts against. X-Forwarded-For is trusted
+ * only from a loopback peer (the local dev proxy); from anyone else it is a
+ * header the caller chose, and honouring it would let each request claim a
+ * fresh address and skip the limit.
+ */
 function resolveClientAddress(req: http.IncomingMessage): string {
+  const peer = req.socket.remoteAddress ?? "unknown";
+  if (!LOOPBACK_ADDRESSES.has(peer)) return peer;
   const forwardedFor = req.headers["x-forwarded-for"];
   const first = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
-  const candidate = first?.split(",")[0]?.trim();
-  return candidate || req.socket.remoteAddress || "unknown";
+  return first?.split(",")[0]?.trim() || peer;
 }
 
 function consumeRefreshSlot(clientAddress: string): number | null {
@@ -127,11 +136,17 @@ export async function handleWalletTerminalPairsRoute(
     sendJson(res, 400, { error: "mint must be a base58 Solana mint address" });
     return true;
   }
-  res.setHeader("Cache-Control", "public, max-age=30");
+  // Only a fresh answer may be cached by the browser; stale answers and
+  // errors must be asked for again.
+  res.setHeader("Cache-Control", "no-store");
+  const fresh = (response: WalletTerminalTokenPairsResponse) => {
+    res.setHeader("Cache-Control", "public, max-age=30");
+    sendJson(res, 200, response);
+  };
 
   const cached = cache.get(mint);
   if (cached && cached.expiresAt > Date.now()) {
-    sendJson(res, 200, cached.response);
+    fresh(cached.response);
     return true;
   }
   if (!inFlight.has(mint)) {
@@ -147,7 +162,7 @@ export async function handleWalletTerminalPairsRoute(
     }
   }
   try {
-    sendJson(res, 200, await loadPairs(mint));
+    fresh(await loadPairs(mint));
   } catch (error) {
     // error-policy:J1 transport boundary: stale cache or a structured 502.
     const message = errorMessage(error);

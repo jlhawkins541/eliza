@@ -55,6 +55,12 @@ export interface TerminalExchangeHarness {
   readonly balances: Record<"kraken" | "okx", Record<string, string>>;
   /** Kraken validate/place errors, as Kraken's `error` list would carry them. */
   krakenErrors: string[];
+  /** Amounts open orders hold on Kraken, by currency key. */
+  krakenHeld: Record<string, string>;
+  /** When set, the next OKX order placement answers with this error code. */
+  okxPlaceCode: string | null;
+  /** Best bid each venue reports for every market. */
+  bids: Record<"kraken" | "okx", string>;
   /** When set, the next order placement throws before any answer arrives. */
   dropNextPlacement: boolean;
   request(
@@ -95,6 +101,9 @@ export function createTerminalExchangeHarness(
       okx: { USD: "500", SOL: "3" },
     },
     krakenErrors: [],
+    krakenHeld: {},
+    okxPlaceCode: null,
+    bids: { kraken: "150.00", okx: "150.00" },
     dropNextPlacement: false,
     request,
   };
@@ -117,8 +126,16 @@ export function createTerminalExchangeHarness(
     }
     const method = path.replace("/0/private/", "");
     harness.calls.push({ venue: "kraken", method, path, params });
-    if (method === "Balance") {
-      return json({ error: [], result: harness.balances.kraken });
+    if (method === "BalanceEx") {
+      return json({
+        error: [],
+        result: Object.fromEntries(
+          Object.entries(harness.balances.kraken).map(([key, balance]) => [
+            key,
+            { balance, hold_trade: harness.krakenHeld[key] ?? "0.0000" },
+          ]),
+        ),
+      });
     }
     if (method === "AddOrder") {
       if (harness.krakenErrors.length > 0) {
@@ -158,6 +175,22 @@ export function createTerminalExchangeHarness(
         },
       });
     }
+    if (method === "ClosedOrders") {
+      const closed = harness.orders.filter(
+        (order) =>
+          order.venue === "kraken" &&
+          order.state !== "open" &&
+          order.clientOrderId === params.cl_ord_id,
+      );
+      return json({
+        error: [],
+        result: {
+          closed: Object.fromEntries(
+            closed.map((order) => [order.orderId, { status: order.state }]),
+          ),
+        },
+      });
+    }
     if (method === "QueryOrders") {
       const order = harness.orders.find((o) => o.orderId === params.txid);
       return json({
@@ -191,7 +224,10 @@ export function createTerminalExchangeHarness(
       ...Object.fromEntries(url.searchParams),
       ...(body ? (JSON.parse(body) as Record<string, string>) : {}),
     };
-    if (url.pathname !== "/api/v5/public/instruments") {
+    if (
+      url.pathname !== "/api/v5/public/instruments" &&
+      url.pathname !== "/api/v5/market/ticker"
+    ) {
       const expected = okxSignature(
         headers["OK-ACCESS-TIMESTAMP"] ?? "",
         method,
@@ -214,6 +250,13 @@ export function createTerminalExchangeHarness(
       path: url.pathname,
       params,
     });
+    if (url.pathname === "/api/v5/market/ticker") {
+      return json({
+        code: "0",
+        msg: "",
+        data: [{ instId: params.instId, bidPx: harness.bids.okx }],
+      });
+    }
     if (url.pathname === "/api/v5/public/instruments") {
       const live = params.instId === "SOL-USD" || params.instId === "SOL-USDC";
       return json({
@@ -251,6 +294,15 @@ export function createTerminalExchangeHarness(
       if (harness.dropNextPlacement) {
         harness.dropNextPlacement = false;
         throw new Error("socket hang up");
+      }
+      if (harness.okxPlaceCode !== null) {
+        const code = harness.okxPlaceCode;
+        harness.okxPlaceCode = null;
+        return json({
+          code: "1",
+          msg: "",
+          data: [{ sCode: code, sMsg: `error ${code}` }],
+        });
       }
       const order = orderFrom("okx", params.instId ?? "", {
         type: params.side ?? "",
@@ -337,6 +389,22 @@ export function createTerminalExchangeHarness(
     init: RequestInit = {},
   ): Promise<Response> => {
     const url = new URL(String(input));
+    if (url.origin === KRAKEN_API_URL && url.pathname === "/0/public/Ticker") {
+      harness.calls.push({
+        venue: "kraken",
+        method: "Ticker",
+        path: url.pathname,
+        params: Object.fromEntries(url.searchParams),
+      });
+      return json({
+        error: [],
+        result: {
+          [url.searchParams.get("pair") ?? ""]: {
+            b: [harness.bids.kraken, "1", "1.000"],
+          },
+        },
+      });
+    }
     if (url.origin === KRAKEN_API_URL) return kraken(url.pathname, init);
     if (url.origin === OKX_URL) return okx(url, init);
     throw new Error(`unexpected request: ${url.href}`);

@@ -295,6 +295,17 @@ export function resolveTerminalMcpTarget(
         `${TERMINAL_MCP_URL_SETTING} must be an http or https origin with no path, credentials or query`,
       );
     }
+    // The agent's API token rides in every request, so plain http is only
+    // allowed to this machine.
+    const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(
+      parsed.hostname,
+    );
+    if (parsed.protocol === "http:" && !loopback) {
+      throw new TerminalMcpError(
+        "invalid-argument",
+        `${TERMINAL_MCP_URL_SETTING} must use https for any host other than this machine, because the agent's API token is sent with each request`,
+      );
+    }
     baseUrl = parsed.origin;
   }
   return { baseUrl, headers: createSelfApiRequestHeaders(env), fetch: fetcher };
