@@ -8,7 +8,8 @@ import type { PendingApproval } from "./pending.js";
 export type WalletBackendNotConfiguredCode =
   | "EVM_PRIVATE_KEY_MISSING"
   | "SOLANA_PRIVATE_KEY_MISSING"
-  | "NO_WALLET_CONFIGURED";
+  | "NO_WALLET_CONFIGURED"
+  | "WALLET_BACKEND_MODE_INVALID";
 
 export class WalletBackendNotConfiguredError extends Error {
   readonly code: WalletBackendNotConfiguredCode;
@@ -21,6 +22,8 @@ export class WalletBackendNotConfiguredError extends Error {
         "Solana private key is not configured. Set SOLANA_PRIVATE_KEY (base58; or hydrate from the OS keychain) before using Solana wallet actions.",
       NO_WALLET_CONFIGURED:
         "No wallet keys are configured. Set at least EVM_PRIVATE_KEY and/or SOLANA_PRIVATE_KEY (local), or use Steward (cloud).",
+      WALLET_BACKEND_MODE_INVALID:
+        "ELIZA_WALLET_BACKEND must be local, steward or auto.",
     };
     super(message ?? defaults[code]);
     this.name = "WalletBackendNotConfiguredError";

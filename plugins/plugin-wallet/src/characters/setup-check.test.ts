@@ -1,7 +1,8 @@
 /**
  * Tests the Crypto Queen setup check over real HTTP: a local server stands in
- * for Ollama's `/api/tags` and a Solana JSON-RPC endpoint, and real `fetch`
- * calls it. The wallet key is generated per test, the character file is the
+ * for Ollama's `/api/tags`, a Solana JSON-RPC endpoint, and every outside
+ * provider (each https request is routed to `/ext/<host>/...` on it), and
+ * real `fetch` calls it. The wallet key is generated per test, the character file is the
  * shipped one, and no outside network is used.
  */
 import { readFileSync } from "node:fs";
@@ -29,6 +30,12 @@ interface FakeServices {
   rpcCalls: string[];
   lunarStatus: number;
   lunarAuth: string[];
+  /** Outside hosts that answer 503. */
+  down: Set<string>;
+  /** Hosts asked for Jito tip accounts, in order. */
+  jitoHosts: string[];
+  krakenErrors: string[];
+  exchangeKeys: string[];
 }
 
 let server: Server;
@@ -43,6 +50,10 @@ beforeEach(async () => {
     rpcCalls: [],
     lunarStatus: 200,
     lunarAuth: [],
+    down: new Set(),
+    jitoHosts: [],
+    krakenErrors: [],
+    exchangeKeys: [],
   };
   server = createServer((req, res) => {
     res.setHeader("content-type", "application/json");
@@ -52,7 +63,55 @@ beforeEach(async () => {
       );
       return;
     }
-    if (req.url === "/lunarcrush/public/coins/btc/v1") {
+    const outside = /^\/ext\/([^/]+)(\/[^?]*)/.exec(req.url ?? "");
+    const host = outside?.[1] ?? "";
+    const route = outside?.[2] ?? "";
+    if (outside && services.down.has(host)) {
+      res.statusCode = 503;
+      res.end("{}");
+      return;
+    }
+    if (route === "/api/v3/ping" && host === "api.coingecko.com") {
+      res.end(JSON.stringify({ gecko_says: "(V3) To the Moon!" }));
+      return;
+    }
+    if (route === "/v1/global" && host === "api.coinpaprika.com") {
+      res.end(JSON.stringify({ market_cap_usd: 2_400_000_000_000 }));
+      return;
+    }
+    if (route === "/api/v1/solana/token_security") {
+      res.end(JSON.stringify({ code: 1, message: "OK", result: {} }));
+      return;
+    }
+    if (route.startsWith("/token-pairs/v1/solana/")) {
+      res.end("[]");
+      return;
+    }
+    if (route === "/api/v1/getTipAccounts" && req.method === "POST") {
+      services.jitoHosts.push(host);
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: ["tip"] }));
+      return;
+    }
+    if (route === "/0/private/BalanceEx" && host === "api.kraken.com") {
+      services.exchangeKeys.push(String(req.headers["api-key"]));
+      res.end(
+        JSON.stringify(
+          services.krakenErrors.length > 0
+            ? { error: services.krakenErrors }
+            : {
+                error: [],
+                result: { ZUSD: { balance: "5", hold_trade: "0" } },
+              },
+        ),
+      );
+      return;
+    }
+    if (route === "/api/v5/account/balance" && host === "www.okx.com") {
+      services.exchangeKeys.push(String(req.headers["ok-access-key"]));
+      res.end(JSON.stringify({ code: "0", data: [{ details: [] }] }));
+      return;
+    }
+    if (route === "/api4/public/coins/btc/v1") {
       services.lunarAuth.push(String(req.headers.authorization));
       res.statusCode = services.lunarStatus;
       res.end(
@@ -88,12 +147,16 @@ afterEach(async () => {
 });
 
 const deps = {
-  // LunarCrush calls go to the local server's /lunarcrush path instead.
-  fetch: (input: string, init?: RequestInit) =>
-    fetch(
-      input.replace("https://lunarcrush.com/api4", `${baseUrl}/lunarcrush`),
+  // Outside https calls go to the local server's /ext/<host> paths instead.
+  fetch: (input: string, init?: RequestInit) => {
+    const url = new URL(input);
+    return fetch(
+      url.protocol === "https:"
+        ? `${baseUrl}/ext/${url.host}${url.pathname}${url.search}`
+        : input,
       init,
-    ),
+    );
+  },
   readFile: (filePath: string) => {
     try {
       return readFileSync(filePath, "utf8");
@@ -114,6 +177,11 @@ function fullEnv(wallet: Keypair): Record<string, string> {
     SOLANA_RPC_URL: `${baseUrl}/rpc`,
     SOLANA_PRIVATE_KEY: bs58.encode(wallet.secretKey),
     LUNARCRUSH_API_KEY: "test-lunarcrush-key",
+    KRAKEN_API_KEY: "test-kraken-key",
+    KRAKEN_API_SECRET: Buffer.from("test-kraken-secret").toString("base64"),
+    OKX_API_KEY: "test-okx-key",
+    OKX_API_SECRET: "test-okx-secret",
+    OKX_API_PASSPHRASE: "test-okx-passphrase",
   };
 }
 
@@ -149,8 +217,23 @@ describe("checkCryptoQueenSetup", () => {
     );
     expect(services.lunarAuth).toEqual(["Bearer test-lunarcrush-key"]);
     expect(find(checks, "Database").area).toBe("@elizaos/plugin-sql");
+    expect(find(checks, "Market prices").detail).toBe(
+      "CoinGecko answers, and the CoinPaprika backup answers too.",
+    );
+    expect(find(checks, "GoPlus token safety").status).toBe("pass");
+    expect(find(checks, "DexScreener liquidity").status).toBe("pass");
+    expect(find(checks, "Jito block engines").detail).toBe(
+      "mainnet.block-engine.jito.wtf answers, with 4 of 4 backup regions answering.",
+    );
+    expect(find(checks, "Kraken orders").detail).toBe(
+      "Kraken accepted the key on a read-only balance check.",
+    );
+    expect(find(checks, "OKX orders").status).toBe("pass");
+    expect(services.exchangeKeys).toEqual(["test-kraken-key", "test-okx-key"]);
     for (const check of checks) {
       expect(check.detail).not.toContain(env.SOLANA_PRIVATE_KEY);
+      expect(check.detail).not.toContain(env.KRAKEN_API_SECRET);
+      expect(check.detail).not.toContain(env.OKX_API_PASSPHRASE);
     }
   });
 
@@ -229,6 +312,98 @@ describe("checkCryptoQueenSetup", () => {
       status: "warn",
       detail: expect.stringContaining("OPENAI_API_KEY"),
     });
+  });
+});
+
+describe("checkCryptoQueenSetup connections", () => {
+  it("falls back to CoinPaprika for prices and fails when both feeds are down", async () => {
+    const env = fullEnv(Keypair.generate());
+    services.down.add("api.coingecko.com");
+    expect(
+      find(await checkCryptoQueenSetup(env, deps), "Market prices"),
+    ).toMatchObject({
+      status: "warn",
+      detail:
+        "CoinGecko did not answer (HTTP 503); Markets will use the CoinPaprika backup.",
+    });
+    services.down.add("api.coinpaprika.com");
+    expect(
+      find(await checkCryptoQueenSetup(env, deps), "Market prices").status,
+    ).toBe("fail");
+  });
+
+  it("fails the token checks a trade relies on when their providers are down", async () => {
+    services.down.add("api.gopluslabs.io");
+    services.down.add("api.dexscreener.com");
+    const checks = await checkCryptoQueenSetup(
+      fullEnv(Keypair.generate()),
+      deps,
+    );
+    expect(find(checks, "GoPlus token safety")).toMatchObject({
+      status: "fail",
+      detail: expect.stringContaining("HTTP 503"),
+    });
+    expect(find(checks, "DexScreener liquidity").status).toBe("fail");
+  });
+
+  it("names Jito regions that are down and warns when the first one is", async () => {
+    const env = fullEnv(Keypair.generate());
+    services.down.add("tokyo.mainnet.block-engine.jito.wtf");
+    expect(
+      find(await checkCryptoQueenSetup(env, deps), "Jito block engines"),
+    ).toMatchObject({
+      status: "pass",
+      detail:
+        "mainnet.block-engine.jito.wtf answers, with 3 of 4 backup regions answering. Not answering: tokyo.mainnet.block-engine.jito.wtf (HTTP 503).",
+    });
+    services.down.add("mainnet.block-engine.jito.wtf");
+    expect(
+      find(await checkCryptoQueenSetup(env, deps), "Jito block engines"),
+    ).toMatchObject({
+      status: "warn",
+      detail: expect.stringMatching(/^The first block engine is down/),
+    });
+  });
+
+  it("checks only the configured Jito engines and rejects an unusable one", async () => {
+    const env = {
+      ...fullEnv(Keypair.generate()),
+      JITO_BLOCK_ENGINE_URL: "https://a.block-engine.test",
+      JITO_BLOCK_ENGINE_BACKUP_URLS: "https://b.block-engine.test",
+    };
+    await checkCryptoQueenSetup(env, deps);
+    expect(services.jitoHosts.sort()).toEqual([
+      "a.block-engine.test",
+      "b.block-engine.test",
+    ]);
+    const bad = find(
+      await checkCryptoQueenSetup(
+        { ...env, JITO_BLOCK_ENGINE_BACKUP_URLS: "http://b.block-engine.test" },
+        deps,
+      ),
+      "Jito block engines",
+    );
+    expect(bad.status).toBe("fail");
+    expect(bad.detail).toContain("JITO_BLOCK_ENGINE_BACKUP_URLS");
+  });
+
+  it("fails a refused or half-set exchange key and warns when none is set", async () => {
+    services.krakenErrors = ["EAPI:Invalid key"];
+    const { OKX_API_PASSPHRASE: _unused, ...env } = fullEnv(Keypair.generate());
+    const checks = await checkCryptoQueenSetup(env, deps);
+    const kraken = find(checks, "Kraken orders");
+    expect(kraken.status).toBe("fail");
+    expect(kraken.detail).toContain("EAPI:Invalid key");
+    expect(kraken.detail).not.toContain(env.KRAKEN_API_SECRET);
+    expect(find(checks, "OKX orders")).toMatchObject({
+      status: "fail",
+      detail: expect.stringMatching(/^OKX_API_PASSPHRASE not set/),
+    });
+    expect(services.exchangeKeys).toEqual(["test-kraken-key"]);
+
+    const none = await checkCryptoQueenSetup({}, deps);
+    expect(find(none, "Kraken orders").status).toBe("warn");
+    expect(find(none, "OKX orders").status).toBe("warn");
   });
 });
 

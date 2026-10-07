@@ -26,7 +26,6 @@ import { SOLANA_SERVICE_NAME } from "../../chains/solana/constants";
 import { DEFAULT_JUPITER_API_BASE_URL } from "../../chains/solana/jupiter-api";
 import { WALLET_BACKEND_SERVICE_TYPE } from "../../services/wallet-backend-service";
 import { LocalEoaBackend } from "../../wallet/local-eoa-backend";
-import { DEFAULT_JITO_BLOCK_ENGINE_URL } from "../terminal-trade";
 import { handleWalletRoutes, type WalletRouteContext } from "../wallet-routes";
 
 /** Decimals of the harness token mint. */
@@ -63,6 +62,10 @@ export interface TerminalTradeHarness {
   readonly jitoSends: Array<{ url: string; bytes: Uint8Array }>;
   /** A JSON-RPC error message the block engine answers with, when set. */
   jitoError: string | null;
+  /** Hosts whose block engine is down: an HTTP status, or no answer at all. */
+  readonly jitoDown: Map<string, number | "unreachable">;
+  /** The host of every block engine a send reached, in order. */
+  readonly jitoAttempts: string[];
   /** Transactions passed to `simulateTransaction`. */
   readonly simulated: VersionedTransaction[];
   /** Raw bytes passed to `sendRawTransaction`. */
@@ -142,6 +145,8 @@ export async function createTerminalTradeHarness(
     swapRequests: [] as Record<string, unknown>[],
     jitoSends: [] as Array<{ url: string; bytes: Uint8Array }>,
     jitoError: null as string | null,
+    jitoDown: new Map<string, number | "unreachable">(),
+    jitoAttempts: [] as string[],
     simulated: [] as VersionedTransaction[],
     sent: [] as Uint8Array[],
     built: [] as VersionedTransaction[],
@@ -199,9 +204,15 @@ export async function createTerminalTradeHarness(
     const url = typeof input === "string" ? input : input.toString();
     const block = new URL(url);
     if (
-      block.origin === new URL(DEFAULT_JITO_BLOCK_ENGINE_URL).origin ||
+      block.hostname.endsWith("block-engine.jito.wtf") ||
       block.hostname.endsWith(".block-engine.test")
     ) {
+      harness.jitoAttempts.push(block.host);
+      const down = harness.jitoDown.get(block.host);
+      if (down === "unreachable") throw new TypeError("fetch failed");
+      if (down !== undefined) {
+        return new Response("busy", { status: down });
+      }
       const call = JSON.parse(String(init?.body)) as {
         id: number;
         method: string;

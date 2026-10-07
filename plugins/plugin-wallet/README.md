@@ -77,6 +77,8 @@ The plugin supports two signing backends, selected by `ELIZA_WALLET_BACKEND`:
 - **`steward`** — multi-tenant Steward signing service. Required for cloud and mobile deployments.
 - **`auto`** (default) — uses Steward when `ELIZA_CLOUD_PROVISIONED=1` or `ELIZA_WALLET_STEWARD_AUTO=1`, otherwise local.
 
+Any other value, such as a typo, fails with `WALLET_BACKEND_MODE_INVALID` rather than falling back to `auto`, so a misspelled `local` can never hand signing to Steward.
+
 ## Required configuration
 
 None of the variables below are strictly required at load time; the plugin degrades gracefully. To get signing:

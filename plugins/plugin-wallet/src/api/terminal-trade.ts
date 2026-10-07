@@ -16,8 +16,9 @@
  * A trade goes out one of two ways, chosen per review: through the Solana RPC
  * with a capped priority fee, or with a Jito tip
  * (`WALLET_TERMINAL_JITO_TIP_LAMPORTS`) straight to a Jito block engine
- * (`JITO_BLOCK_ENGINE_URL`) as a bundle-only send, which keeps it out of the
- * public mempool. Either way the RPC confirms the result. Failures are `ElizaError`s whose codes map to
+ * (`JITO_BLOCK_ENGINE_URL`, then the `JITO_BLOCK_ENGINE_BACKUP_URLS` regions
+ * when it is down) as a bundle-only send, which keeps it out of the public
+ * mempool. Either way the RPC confirms the result. Failures are `ElizaError`s whose codes map to
  * HTTP statuses through {@link TERMINAL_TRADE_ERROR_STATUS}.
  */
 import crypto from "node:crypto";
@@ -61,6 +62,15 @@ export const MIN_TERMINAL_JITO_TIP_LAMPORTS = 1_000;
 export const JITO_BLOCK_ENGINE_URL_SETTING = "JITO_BLOCK_ENGINE_URL";
 export const DEFAULT_JITO_BLOCK_ENGINE_URL =
   "https://mainnet.block-engine.jito.wtf";
+export const JITO_BLOCK_ENGINE_BACKUP_URLS_SETTING =
+  "JITO_BLOCK_ENGINE_BACKUP_URLS";
+/** Jito's regional mainnet block engines, tried in order when the first is down. */
+export const DEFAULT_JITO_BLOCK_ENGINE_BACKUP_URLS: readonly string[] = [
+  "https://ny.mainnet.block-engine.jito.wtf",
+  "https://amsterdam.mainnet.block-engine.jito.wtf",
+  "https://frankfurt.mainnet.block-engine.jito.wtf",
+  "https://tokyo.mainnet.block-engine.jito.wtf",
+];
 const SEND_ROUTES: readonly WalletTerminalTradeSendRoute[] = ["rpc", "jito"];
 const SOL_DECIMALS = 9;
 const SOLANA_BASE_FEE_LAMPORTS = 5_000;
@@ -284,12 +294,8 @@ function resolveJitoTipLamports(runtime: IAgentRuntime): number {
   return value;
 }
 
-function resolveJitoBlockEngineUrl(runtime: IAgentRuntime): string {
-  const raw = runtime.getSetting(JITO_BLOCK_ENGINE_URL_SETTING);
-  if (raw === null || raw === undefined || raw === "") {
-    return DEFAULT_JITO_BLOCK_ENGINE_URL;
-  }
-  const value = String(raw).trim().replace(/\/+$/, "");
+function parseBlockEngineUrl(raw: string, setting: string): string {
+  const value = raw.trim().replace(/\/+$/, "");
   let url: URL | null;
   try {
     url = new URL(value);
@@ -305,11 +311,56 @@ function resolveJitoBlockEngineUrl(runtime: IAgentRuntime): string {
   ) {
     throw tradeError(
       "TERMINAL_TRADE_LIMIT_INVALID",
-      `${JITO_BLOCK_ENGINE_URL_SETTING} must be an https block engine address, such as ${DEFAULT_JITO_BLOCK_ENGINE_URL}.`,
-      { context: { value: String(raw) } },
+      `${setting} must be an https block engine address, such as ${DEFAULT_JITO_BLOCK_ENGINE_URL}.`,
+      { context: { value: raw } },
     );
   }
   return value;
+}
+
+function resolveJitoBlockEngineUrl(
+  runtime: Pick<IAgentRuntime, "getSetting">,
+): string {
+  const raw = runtime.getSetting(JITO_BLOCK_ENGINE_URL_SETTING);
+  if (raw === null || raw === undefined || raw === "") {
+    return DEFAULT_JITO_BLOCK_ENGINE_URL;
+  }
+  return parseBlockEngineUrl(String(raw), JITO_BLOCK_ENGINE_URL_SETTING);
+}
+
+/**
+ * Block engines to try, in order, when the first one is unreachable or busy.
+ * Unset means Jito's regional engines; `none` turns backups off; otherwise a
+ * comma-separated list of https addresses. The first engine is never repeated.
+ */
+function resolveJitoBackupUrls(
+  runtime: Pick<IAgentRuntime, "getSetting">,
+  primary: string,
+): string[] {
+  const raw = runtime.getSetting(JITO_BLOCK_ENGINE_BACKUP_URLS_SETTING);
+  const text = raw === null || raw === undefined ? "" : String(raw).trim();
+  if (text.toLowerCase() === "none") return [];
+  const urls =
+    text === ""
+      ? [...DEFAULT_JITO_BLOCK_ENGINE_BACKUP_URLS]
+      : text
+          .split(",")
+          .map((entry) =>
+            parseBlockEngineUrl(entry, JITO_BLOCK_ENGINE_BACKUP_URLS_SETTING),
+          );
+  return [...new Set(urls)].filter((url) => url !== primary);
+}
+
+/** The reviewed block engine and its backups; throws on a setting it can't use. */
+export function resolveJitoRoute(runtime: Pick<IAgentRuntime, "getSetting">): {
+  blockEngineUrl: string;
+  backupBlockEngineUrls: string[];
+} {
+  const blockEngineUrl = resolveJitoBlockEngineUrl(runtime);
+  return {
+    blockEngineUrl,
+    backupBlockEngineUrls: resolveJitoBackupUrls(runtime, blockEngineUrl),
+  };
 }
 
 /** Real-trading readiness for the terminal's Real trade tab. */
@@ -327,7 +378,7 @@ export function describeTerminalTrading(
     reviewSeconds: TERMINAL_TRADE_REVIEW_TTL_MS / 1000,
     jito: {
       tipLamports: resolveJitoTipLamports(agentRuntime),
-      blockEngineUrl: resolveJitoBlockEngineUrl(agentRuntime),
+      ...resolveJitoRoute(agentRuntime),
     },
   };
 }
@@ -496,7 +547,7 @@ export async function reviewTerminalTrade(
     request.sendRoute === "jito"
       ? {
           tipLamports: resolveJitoTipLamports(agentRuntime),
-          blockEngineUrl: resolveJitoBlockEngineUrl(agentRuntime),
+          ...resolveJitoRoute(agentRuntime),
         }
       : null;
   const signer = resolveSigner(agentRuntime);
@@ -559,6 +610,7 @@ export async function reviewTerminalTrade(
     ? {
         route: "jito",
         blockEngineUrl: jito.blockEngineUrl,
+        backupBlockEngineUrls: jito.backupBlockEngineUrls,
         detail:
           "Sent only to Jito's block engine as a bundle, not to the public mempool. It lands only with its tip.",
       }
@@ -619,33 +671,42 @@ interface JitoSendReply {
   error?: { message?: unknown };
 }
 
+/** A block engine that never answered, or answered busy, before taking the send. */
+class JitoEngineUnavailableError extends Error {}
+
 /**
- * Hand a signed transaction to a Jito block engine with `bundleOnly=true`, so
- * Jito wraps it in a bundle and never forwards it to RPC nodes. Jito always
- * skips preflight; the review's simulation is the preflight here.
+ * Hand a signed transaction to one Jito block engine with `bundleOnly=true`,
+ * so Jito wraps it in a bundle and never forwards it to RPC nodes. Jito
+ * always skips preflight; the review's simulation is the preflight here.
  */
-async function sendThroughJito(
+async function sendToJitoEngine(
   runtime: IAgentRuntime,
   blockEngineUrl: string,
   signed: VersionedTransaction,
 ): Promise<void> {
   const fetchFn = runtime.fetch ?? globalThis.fetch;
-  const response = await fetchFn(
-    `${blockEngineUrl}/api/v1/transactions?bundleOnly=true`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: 1,
-        jsonrpc: "2.0",
-        method: "sendTransaction",
-        params: [
-          Buffer.from(signed.serialize()).toString("base64"),
-          { encoding: "base64" },
-        ],
-      }),
-    },
-  );
+  let response: Response;
+  try {
+    response = await fetchFn(
+      `${blockEngineUrl}/api/v1/transactions?bundleOnly=true`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: 1,
+          jsonrpc: "2.0",
+          method: "sendTransaction",
+          params: [
+            Buffer.from(signed.serialize()).toString("base64"),
+            { encoding: "base64" },
+          ],
+        }),
+      },
+    );
+  } catch (cause) {
+    // error-policy:J2 no answer at all lets the caller try the next region.
+    throw new JitoEngineUnavailableError(messageOf(cause), { cause });
+  }
   const text = await response.text();
   let reply: JitoSendReply;
   try {
@@ -654,13 +715,49 @@ async function sendThroughJito(
     // error-policy:J3 a non-JSON reply is reported with its HTTP status.
     reply = {};
   }
-  if (!response.ok || reply.error || typeof reply.result !== "string") {
-    throw new Error(
-      typeof reply.error?.message === "string"
-        ? reply.error.message
-        : `HTTP ${response.status}`,
-    );
+  if (response.ok && !reply.error && typeof reply.result === "string") return;
+  const message =
+    typeof reply.error?.message === "string"
+      ? reply.error.message
+      : `HTTP ${response.status}`;
+  if (response.status === 429 || response.status >= 500) {
+    throw new JitoEngineUnavailableError(message);
   }
+  throw new Error(message);
+}
+
+/**
+ * Send through the reviewed block engine, then each backup region in turn,
+ * moving on only when an engine was unreachable or answered 429/5xx. Every
+ * attempt carries the same signed bytes, so the trade has one signature and
+ * can land at most once however many regions see it. A refusal (bad tip,
+ * invalid transaction) stops at once, since another region would refuse too.
+ */
+async function sendThroughJito(
+  runtime: IAgentRuntime,
+  route: { blockEngineUrl: string; backupBlockEngineUrls: string[] },
+  signed: VersionedTransaction,
+): Promise<void> {
+  const failures: string[] = [];
+  for (const url of [route.blockEngineUrl, ...route.backupBlockEngineUrls]) {
+    try {
+      await sendToJitoEngine(runtime, url, signed);
+      if (failures.length > 0) {
+        runtime.logger.warn(
+          { blockEngineUrl: url, failures },
+          "[WalletTerminalTrade] Jito send used a backup region",
+        );
+      }
+      return;
+    } catch (error) {
+      // error-policy:J2 only an unreachable or busy engine moves to the next region.
+      if (!(error instanceof JitoEngineUnavailableError)) throw error;
+      failures.push(`${new URL(url).host}: ${error.message}`);
+    }
+  }
+  throw new Error(
+    `every block engine was unavailable (${failures.join("; ")})`,
+  );
 }
 
 function explorerUrl(signature: string): string {
@@ -750,7 +847,7 @@ export async function executeTerminalTrade(
   const route = pending.sending;
   try {
     if (route.route === "jito") {
-      await sendThroughJito(agentRuntime, route.blockEngineUrl, signed);
+      await sendThroughJito(agentRuntime, route, signed);
     } else {
       await connection.sendRawTransaction(signed.serialize(), {
         skipPreflight: false,

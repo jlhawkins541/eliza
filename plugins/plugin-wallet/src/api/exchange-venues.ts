@@ -101,20 +101,28 @@ export interface ExchangeVenueClient {
   cancelOrder(intent: ExchangeOrderIntent, orderId: string): Promise<void>;
 }
 
+/** What the venue clients read from the agent: its settings and its fetch. */
+export interface VenueRuntime {
+  getSetting: IAgentRuntime["getSetting"];
+  fetch?:
+    | ((input: string | URL | Request, init?: RequestInit) => Promise<Response>)
+    | null;
+}
+
 type Json = Record<string, unknown>;
 
 function isObject(value: unknown): value is Json {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function readSetting(runtime: IAgentRuntime, key: string): string | null {
+function readSetting(runtime: VenueRuntime, key: string): string | null {
   const raw = runtime.getSetting(key);
   return typeof raw === "string" && raw.trim() !== "" ? raw.trim() : null;
 }
 
 /** Settings a venue still needs, in the order the venue's docs list them. */
 export function missingVenueSettings(
-  runtime: IAgentRuntime,
+  runtime: VenueRuntime,
   venue: WalletExchangeVenue,
 ): string[] {
   return EXCHANGE_VENUE_SETTINGS[venue].filter(
@@ -122,7 +130,7 @@ export function missingVenueSettings(
   );
 }
 
-function requireSetting(runtime: IAgentRuntime, key: string): string {
+function requireSetting(runtime: VenueRuntime, key: string): string {
   const value = readSetting(runtime, key);
   if (value === null) {
     throw new ExchangeVenueError(
@@ -133,12 +141,14 @@ function requireSetting(runtime: IAgentRuntime, key: string): string {
   return value;
 }
 
-function fetcherOf(runtime: IAgentRuntime): typeof fetch {
+function fetcherOf(
+  runtime: VenueRuntime,
+): (input: string, init: RequestInit) => Promise<Response> {
   return runtime.fetch ?? globalThis.fetch;
 }
 
 async function send(
-  runtime: IAgentRuntime,
+  runtime: VenueRuntime,
   venueName: string,
   url: string,
   init: RequestInit,
@@ -245,7 +255,7 @@ function krakenStateOf(status: unknown, filled: string | null) {
   }
 }
 
-export function krakenClient(runtime: IAgentRuntime): ExchangeVenueClient {
+export function krakenClient(runtime: VenueRuntime): ExchangeVenueClient {
   async function privateCall(
     method: string,
     params: Record<string, string>,
@@ -452,7 +462,7 @@ function okxStateOf(state: unknown): WalletExchangeOrderState {
 }
 
 /** The OKX origin to call: `OKX_API_BASE_URL` (https, no path) or the default. */
-export function resolveOkxApiUrl(runtime: IAgentRuntime): string {
+export function resolveOkxApiUrl(runtime: VenueRuntime): string {
   const configured = readSetting(runtime, OKX_API_URL_SETTING);
   if (configured === null) return DEFAULT_OKX_API_URL;
   let parsed: URL;
@@ -488,7 +498,7 @@ export function resolveOkxApiUrl(runtime: IAgentRuntime): string {
  */
 const OKX_TRANSIENT_CODES = new Set(["50001", "50004", "50013", "50026"]);
 
-export function okxClient(runtime: IAgentRuntime): ExchangeVenueClient {
+export function okxClient(runtime: VenueRuntime): ExchangeVenueClient {
   async function call(
     method: "GET" | "POST",
     path: string,
@@ -667,7 +677,7 @@ export function okxClient(runtime: IAgentRuntime): ExchangeVenueClient {
 }
 
 export function exchangeClient(
-  runtime: IAgentRuntime,
+  runtime: VenueRuntime,
   venue: WalletExchangeVenue,
 ): ExchangeVenueClient {
   return venue === "kraken" ? krakenClient(runtime) : okxClient(runtime);

@@ -155,8 +155,10 @@ plugins/plugin-wallet/
                                low-level SDK stdio glue (server.ts), `mcp` entry
     routes/
       plugin.ts                Additional plugin route exports
-      wallet-terminal-market-route.ts  Public read-only CoinGecko market list and
-                               price history for the crypto terminal
+      wallet-terminal-market-route.ts  Public read-only market list and price
+                               history for the crypto terminal: CoinGecko, falling
+                               back to CoinPaprika when CoinGecko fails
+      coinpaprika-backup.ts    CoinPaprika URLs and parsers for that backup
       wallet-terminal-token-safety-route.ts  Public read-only GoPlus Solana token
                                safety report (checks + avoid/caution verdict)
       wallet-terminal-pairs-route.ts  Public read-only DexScreener pools and liquidity
@@ -207,7 +209,7 @@ bun run --cwd plugins/plugin-wallet test          # run package tests
 bun run --cwd plugins/plugin-wallet test:watch    # watch test lane
 bun run --cwd plugins/plugin-wallet build:views   # standalone view bundle → dist/views/bundle.js
 bun run --cwd plugins/plugin-wallet build:ui-types # UI declaration emit (tsconfig.ui.json)
-bun run --cwd plugins/plugin-wallet check:crypto-queen # check packages/agent/.env for the Crypto Queen agent
+bun run --cwd plugins/plugin-wallet check:crypto-queen # check packages/agent/.env and every connection Crypto Queen uses
 bun run --cwd plugins/plugin-wallet mcp           # read-only terminal MCP server over stdio (needs the running agent)
 ```
 
@@ -221,7 +223,7 @@ All read via `runtime.getSetting()` (or `process.env` fallback where noted).
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ELIZA_WALLET_BACKEND` | No | `local` \| `steward` \| `auto` (default: `auto`). Auto = Steward when cloud-provisioned, else local. |
+| `ELIZA_WALLET_BACKEND` | No | `local` \| `steward` \| `auto` (default: `auto`; case and spaces ignored). Auto = Steward when cloud-provisioned, else local. Any other value fails with `WALLET_BACKEND_MODE_INVALID` instead of falling back to auto. |
 | `EVM_PRIVATE_KEY` | Local backend | 32-byte hex, 0x-prefixed. Local EOA signing key for EVM. |
 | `SOLANA_PRIVATE_KEY` | Solana local | Base58-encoded Solana private key. |
 | `STEWARD_API_URL` | Steward backend | Steward API base URL. |
@@ -241,7 +243,7 @@ All read via `runtime.getSetting()` (or `process.env` fallback where noted).
 | `COINGECKO_API_KEY` | No | CoinGecko API key (also accepts `COINGECKO_DEMO_API_KEY` / `COINGECKO_PRO_API_KEY`). |
 | `HELIUS_API_KEY` | No | Helius API key for enhanced Solana RPC. |
 | `ELIZAOS_CLOUD_API_KEY` | No | Eliza Cloud API key for cloud-routing fallbacks. |
-| `ELIZA_WALLET_EXPORT_TOKEN` | No | Auth token required to export wallet keys via HTTP routes. |
+| `ELIZA_WALLET_EXPORT_TOKEN` | No | Unused by this plugin: `POST /api/wallet/export` answers 410, so keys never leave `packages/agent/.env` over HTTP. |
 | `WALLET_TERMINAL_MAX_BUY_SOL` | No | Largest SOL amount one crypto terminal buy may spend. Defaults to `1`; a non-positive or non-numeric value is an error, not a fallback. |
 | `WALLET_TERMINAL_JITO_TIP_LAMPORTS` | No | Tip a crypto terminal trade sent through Jito pays. Defaults to `100000`; must be a whole number from `1000` (Jito's minimum) to `4000000` (the RPC route's priority-fee cap), otherwise an error. |
 | `KRAKEN_API_KEY`, `KRAKEN_API_SECRET` | No | Kraken API key and base64 secret for terminal exchange orders. Server-side only; trade rights only, never withdrawal rights. |
@@ -251,6 +253,7 @@ All read via `runtime.getSetting()` (or `process.env` fallback where noted).
 | `ELIZA_TERMINAL_MCP_URL` | No | http(s) origin of the agent the terminal MCP server reads from. Defaults to `http://127.0.0.1:<agent port>`; anything with a path, query or credentials, or plain http to a host other than this machine, is an error. |
 | `LUNARCRUSH_API_KEY` | No | LunarCrush API v4 key for the terminal's Social row and `WALLET action=social_signal`. Server-side only; never sent to the browser, logged, or returned. Unset means "Add a LunarCrush key" and no request. |
 | `JITO_BLOCK_ENGINE_URL` | No | https Jito block engine the terminal's Jito route sends to. Defaults to `https://mainnet.block-engine.jito.wtf`. |
+| `JITO_BLOCK_ENGINE_BACKUP_URLS` | No | Comma-separated https block engines tried in order when the first is unreachable or answers 429/5xx; the same signed bytes go to each, so a trade lands at most once. Defaults to Jito's ny, amsterdam, frankfurt and tokyo regions; `none` turns backups off. |
 | `X402_SUPPORTED_NETWORKS` | No | Comma-separated network list for x402 SDK. |
 | `X402_GLOBAL_DAILY_LIMIT` | No | Daily USDC spend cap for x402. |
 | `X402_PER_REQUEST_MAX` | No | Per-request USDC cap for x402. |

@@ -70,6 +70,12 @@ describe("terminal trade status", () => {
         jito: {
           tipLamports: 100_000,
           blockEngineUrl: "https://mainnet.block-engine.jito.wtf",
+          backupBlockEngineUrls: [
+            "https://ny.mainnet.block-engine.jito.wtf",
+            "https://amsterdam.mainnet.block-engine.jito.wtf",
+            "https://frankfurt.mainnet.block-engine.jito.wtf",
+            "https://tokyo.mainnet.block-engine.jito.wtf",
+          ],
         },
       },
     });
@@ -472,12 +478,14 @@ describe("terminal trade Jito route", () => {
       settings: {
         WALLET_TERMINAL_JITO_TIP_LAMPORTS: "250000",
         JITO_BLOCK_ENGINE_URL: "https://ny.block-engine.test/",
+        JITO_BLOCK_ENGINE_BACKUP_URLS: "none",
       },
     });
     const status = await h.request("GET", STATUS);
     expect(status.body.jito).toEqual({
       tipLamports: 250_000,
       blockEngineUrl: "https://ny.block-engine.test",
+      backupBlockEngineUrls: [],
     });
     const review = await h.request("POST", REVIEW, jitoBuy(h));
     expect(h.swapRequests[0]?.prioritizationFeeLamports).toEqual({
@@ -499,6 +507,10 @@ describe("terminal trade Jito route", () => {
       [{ WALLET_TERMINAL_JITO_TIP_LAMPORTS: "0.5" }, /whole number/],
       [{ JITO_BLOCK_ENGINE_URL: "http://ny.block-engine.test" }, /https/],
       [{ JITO_BLOCK_ENGINE_URL: "block engine" }, /https/],
+      [
+        { JITO_BLOCK_ENGINE_BACKUP_URLS: "https://ok.block-engine.test, ny" },
+        /JITO_BLOCK_ENGINE_BACKUP_URLS must be an https/,
+      ],
     ];
     for (const [settings, error] of cases) {
       const h = await createTerminalTradeHarness({ settings });
@@ -509,6 +521,80 @@ describe("terminal trade Jito route", () => {
       expect(review.status).toBe(500);
       expect(h.jupiterCalls).toEqual([]);
     }
+  });
+
+  async function reviewAndSend(h: TerminalTradeHarness) {
+    const review = await h.request("POST", REVIEW, jitoBuy(h));
+    return h.request("POST", EXECUTE, {
+      reviewId: review.body.reviewId,
+      confirm: true,
+    });
+  }
+
+  it("tries the next region when a block engine is down or busy", async () => {
+    const h = await createTerminalTradeHarness();
+    h.jitoDown.set("mainnet.block-engine.jito.wtf", "unreachable");
+    h.jitoDown.set("ny.mainnet.block-engine.jito.wtf", 429);
+    h.jitoDown.set("amsterdam.mainnet.block-engine.jito.wtf", 503);
+    const execute = await reviewAndSend(h);
+    expect(execute.status).toBe(200);
+    expect(execute.body.status).toBe("confirmed");
+    expect(h.jitoAttempts).toEqual([
+      "mainnet.block-engine.jito.wtf",
+      "ny.mainnet.block-engine.jito.wtf",
+      "amsterdam.mainnet.block-engine.jito.wtf",
+      "frankfurt.mainnet.block-engine.jito.wtf",
+    ]);
+    expect(h.jitoSends).toHaveLength(1);
+    expect(h.sent).toEqual([]);
+  });
+
+  it("uses the configured backups in order and never repeats the first engine", async () => {
+    const h = await createTerminalTradeHarness({
+      settings: {
+        JITO_BLOCK_ENGINE_URL: "https://a.block-engine.test",
+        JITO_BLOCK_ENGINE_BACKUP_URLS:
+          " https://a.block-engine.test/, https://b.block-engine.test ,https://c.block-engine.test",
+      },
+    });
+    const status = await h.request("GET", STATUS);
+    expect(status.body.jito.backupBlockEngineUrls).toEqual([
+      "https://b.block-engine.test",
+      "https://c.block-engine.test",
+    ]);
+    h.jitoDown.set("a.block-engine.test", 502);
+    const execute = await reviewAndSend(h);
+    expect(execute.status).toBe(200);
+    expect(h.jitoAttempts).toEqual([
+      "a.block-engine.test",
+      "b.block-engine.test",
+    ]);
+  });
+
+  it("stops at a refusal instead of shopping it to other regions", async () => {
+    const h = await createTerminalTradeHarness();
+    h.jitoError = "bundle tip too low";
+    const execute = await reviewAndSend(h);
+    expect(execute.status).toBe(502);
+    expect(h.jitoAttempts).toEqual(["mainnet.block-engine.jito.wtf"]);
+  });
+
+  it("names every region and the signature when all block engines are down", async () => {
+    const h = await createTerminalTradeHarness({
+      settings: {
+        JITO_BLOCK_ENGINE_URL: "https://a.block-engine.test",
+        JITO_BLOCK_ENGINE_BACKUP_URLS: "https://b.block-engine.test",
+      },
+    });
+    h.jitoDown.set("a.block-engine.test", 503);
+    h.jitoDown.set("b.block-engine.test", "unreachable");
+    const execute = await reviewAndSend(h);
+    expect(execute.status).toBe(502);
+    expect(execute.body.error).toMatch(
+      /^Jito did not accept the trade \(every block engine was unavailable \(a\.block-engine\.test: HTTP 503; b\.block-engine\.test: fetch failed\)\)\. If you're unsure whether it went through, look up [1-9A-HJ-NP-Za-km-z]{64,88} before trying again\.$/,
+    );
+    expect(h.jitoSends).toEqual([]);
+    expect(h.sent).toEqual([]);
   });
 
   it("names the signature when the block engine refuses the send", async () => {
