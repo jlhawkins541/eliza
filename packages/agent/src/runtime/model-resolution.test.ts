@@ -1,13 +1,15 @@
 /**
  * Coverage for the model-resolution helpers in ./model-resolution.ts: primary
  * model id extraction, provider id resolution across transport/backend
- * combinations, and the provider-to-plugin mapping. Runs against the real
+ * combinations, the provider-to-plugin mapping, and the boot-time pin after
+ * the direct-provider model gate. Runs against the real
  * @elizaos/shared first-run provider catalog and service-routing resolver —
  * those helpers are pure config readers, so no mocking is needed.
  */
 import type { ElizaConfig } from "@elizaos/shared";
 import { describe, expect, it } from "vitest";
 import {
+  resolveBootTextProvider,
   resolvePreferredProviderId,
   resolvePreferredProviderPluginName,
   resolvePrimaryModel,
@@ -121,5 +123,49 @@ describe("resolvePreferredProviderPluginName", () => {
         "@elizaos/plugin-openai",
       );
     }
+  });
+});
+
+describe("resolveBootTextProvider", () => {
+  it("pins nothing for a direct Grok route without both models", () => {
+    for (const models of [{}, { smallModel: "grok-4-fast" }]) {
+      const boot = resolveBootTextProvider({
+        serviceRouting: {
+          llmText: { transport: "direct", backend: "grok", ...models },
+        },
+      });
+      expect(boot.preferredProviderId).toBeUndefined();
+      expect(boot.preferredProviderPluginName).toBeUndefined();
+      expect(boot.modelSelection.state).toBe("models-required");
+    }
+  });
+
+  it("pins Grok to the OpenAI-compatible plugin once both models are chosen", () => {
+    const boot = resolveBootTextProvider({
+      serviceRouting: {
+        llmText: {
+          transport: "direct",
+          backend: "grok",
+          smallModel: "grok-4-fast",
+          largeModel: "grok-4",
+        },
+      },
+    });
+    expect(boot.preferredProviderId).toBe("grok");
+    expect(boot.preferredProviderPluginName).toBe("@elizaos/plugin-openai");
+    expect(boot.modelSelection.state).toBe("ready");
+  });
+
+  it("matches the plain resolvers for providers with default models", () => {
+    const config: ElizaConfig = {
+      serviceRouting: {
+        llmText: { transport: "direct", backend: "anthropic" },
+      },
+    };
+    const boot = resolveBootTextProvider(config);
+    expect(boot.preferredProviderId).toBe(resolvePreferredProviderId(config));
+    expect(boot.preferredProviderPluginName).toBe(
+      resolvePreferredProviderPluginName(config),
+    );
   });
 });

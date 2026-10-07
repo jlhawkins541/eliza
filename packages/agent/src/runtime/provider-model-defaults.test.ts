@@ -1,7 +1,8 @@
 /**
  * Behavioral coverage for provider-model-defaults: set-if-missing env writes,
  * OpenAI-only model-id detection, applyProviderModelEnvDefaults seeding, and
- * the direct-provider model selection mapping.
+ * the direct-provider model selection gate, its boot projection, and the
+ * account-pool active backend it derives.
  * Drives the real module — empty env, a single override, operator-vs-default
  * ties, Google key alias order, Groq/Cerebras shared-tier copy, and GPT-OSS
  * comparator edges — with no mocks of the seeders.
@@ -12,7 +13,10 @@ import {
   applyDirectProviderModelEnv,
   applyProviderModelEnvDefaults,
   isLikelyOpenAiTextModel,
+  projectDirectProviderModelSelection,
+  resolveAccountPoolActiveBackend,
   resolveDirectProviderModelEnv,
+  resolveDirectProviderModelSelection,
   setEnvIfMissing,
 } from "./provider-model-defaults.ts";
 
@@ -401,5 +405,139 @@ describe("applyDirectProviderModelEnv", () => {
       assignments: { OLLAMA_SMALL_MODEL: "llama3.2:3b" },
     });
     expect(process.env.OLLAMA_SMALL_MODEL).toBeUndefined();
+  });
+});
+
+describe("direct-provider model gate", () => {
+  const route = (
+    backend: string,
+    models: { smallModel?: string; largeModel?: string } = {},
+  ) => ({
+    serviceRouting: { llmText: { backend, transport: "direct", ...models } },
+  });
+
+  it.each([
+    [{}, ["smallModel", "largeModel"]],
+    [{ smallModel: "grok-4-fast" }, ["largeModel"]],
+    [{ largeModel: "grok-4" }, ["smallModel"]],
+    [{ smallModel: "  ", largeModel: "grok-4" }, ["smallModel"]],
+  ])(
+    "reports a Grok route with %j as models-required (missing %j)",
+    (models, missingTiers) => {
+      const selection = resolveDirectProviderModelSelection(
+        route("grok", models),
+      );
+      expect(selection.state).toBe("models-required");
+      if (selection.state !== "models-required") return;
+      expect(selection.provider).toBe("grok");
+      expect(selection.missingTiers).toEqual(missingTiers);
+      expect(selection.error.code).toBe("PROVIDER_MODELS_REQUIRED");
+      expect(selection.error.context).toEqual({
+        provider: "grok",
+        missingTiers,
+      });
+    },
+  );
+
+  it("treats the xai alias the same as grok", () => {
+    expect(
+      resolveDirectProviderModelSelection(
+        route("xai", { smallModel: "grok-4-fast" }),
+      ).state,
+    ).toBe("models-required");
+  });
+
+  it("is ready for a Grok route with both tiers and for providers with defaults", () => {
+    expect(
+      resolveDirectProviderModelSelection(
+        route("grok", { smallModel: "grok-4-fast", largeModel: "grok-4" }),
+      ).state,
+    ).toBe("ready");
+    expect(resolveDirectProviderModelSelection(route("openai")).state).toBe(
+      "ready",
+    );
+    expect(
+      resolveDirectProviderModelSelection(
+        route("anthropic", { largeModel: "claude-opus-4-8" }),
+      ).state,
+    ).toBe("ready");
+    expect(resolveDirectProviderModelSelection({}).state).toBe("not-direct");
+  });
+
+  it("projects nothing for a models-required route", () => {
+    const env: Record<string, unknown> = {};
+    expect(
+      applyDirectProviderModelEnv(
+        route("grok", { smallModel: "grok-4-fast" }),
+        env,
+      ),
+    ).toBeNull();
+    expect(env).toEqual({});
+  });
+
+  describe("projectDirectProviderModelSelection", () => {
+    it("writes a ready selection to process env and config.env", () => {
+      const config: { serviceRouting: unknown; env?: unknown } = route(
+        "openai",
+        { smallModel: "gpt-5.6-luna", largeModel: "gpt-5.6-sol" },
+      );
+      const processEnv: Record<string, unknown> = { OPENAI_SMALL_MODEL: "x" };
+      const selection = projectDirectProviderModelSelection(config, processEnv);
+      expect(selection.state).toBe("ready");
+      expect(processEnv).toEqual({
+        OPENAI_SMALL_MODEL: "gpt-5.6-luna",
+        OPENAI_LARGE_MODEL: "gpt-5.6-sol",
+      });
+      expect(config.env).toEqual({
+        OPENAI_SMALL_MODEL: "gpt-5.6-luna",
+        OPENAI_LARGE_MODEL: "gpt-5.6-sol",
+      });
+    });
+
+    it("keeps existing config.env entries alongside the projection", () => {
+      const config: { serviceRouting: unknown; env?: unknown } = {
+        ...route("ollama", { smallModel: "llama3.2:3b" }),
+        env: { OLLAMA_BASE_URL: "http://192.168.1.50:11434" },
+      };
+      projectDirectProviderModelSelection(config, {});
+      expect(config.env).toEqual({
+        OLLAMA_BASE_URL: "http://192.168.1.50:11434",
+        OLLAMA_SMALL_MODEL: "llama3.2:3b",
+      });
+    });
+
+    it("writes neither sink for a Grok route without both models", () => {
+      const config: { serviceRouting: unknown; env?: unknown } = route("grok", {
+        largeModel: "grok-4",
+      });
+      const processEnv: Record<string, unknown> = {};
+      const selection = projectDirectProviderModelSelection(config, processEnv);
+      expect(selection.state).toBe("models-required");
+      expect(processEnv).toEqual({});
+      expect(config.env).toBeUndefined();
+    });
+  });
+
+  describe("resolveAccountPoolActiveBackend", () => {
+    it("withholds the active backend while the Grok route is models-required", () => {
+      expect(resolveAccountPoolActiveBackend(route("grok"))).toBeUndefined();
+      expect(
+        resolveAccountPoolActiveBackend(
+          route("grok", { smallModel: "grok-4-fast" }),
+        ),
+      ).toBeUndefined();
+    });
+
+    it("passes runnable routes through unchanged", () => {
+      expect(
+        resolveAccountPoolActiveBackend(
+          route("grok", { smallModel: "grok-4-fast", largeModel: "grok-4" }),
+        ),
+      ).toBe("grok");
+      expect(resolveAccountPoolActiveBackend(route("openrouter"))).toBe(
+        "openrouter",
+      );
+      expect(resolveAccountPoolActiveBackend({})).toBeUndefined();
+    });
   });
 });

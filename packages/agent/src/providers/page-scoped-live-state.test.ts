@@ -97,6 +97,16 @@ describe("renderViewLiveStateForJudge — viewId → scope mapping", () => {
     expect(text).toContain("Live transcript state");
   });
 
+  it("gives the Models page the settings live-state surface", async () => {
+    const rt = fakeRuntime();
+    expect(await renderViewLiveStateForJudge(rt, "models")).toBe(
+      await renderViewLiveStateForJudge(rt, "settings"),
+    );
+    expect(await renderViewLiveStateForJudge(rt, "models")).toBe(
+      await renderLiveStateForScope(rt, "page-settings"),
+    );
+  });
+
   it("returns null for a view with no live-state surface", async () => {
     const rt = fakeRuntime();
     expect(await renderViewLiveStateForJudge(rt, "database")).toBeNull();

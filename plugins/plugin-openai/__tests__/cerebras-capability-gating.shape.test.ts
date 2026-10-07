@@ -99,6 +99,18 @@ describe("plugin-openai media capability gating", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it("keeps TEXT_EMBEDDING (local fallback) and RESEARCH registered in Cerebras mode", async () => {
+    const { runtime, registeredModelTypes } = buildRuntime({
+      OPENAI_BASE_URL: "https://api.cerebras.ai/v1",
+      CEREBRAS_API_KEY: "csk-cerebras-fake",
+    });
+
+    await openaiPlugin.init?.({}, runtime);
+
+    expect(registeredModelTypes()).toContain(ModelType.TEXT_EMBEDDING);
+    expect(registeredModelTypes()).toContain(ModelType.RESEARCH);
+  });
+
   it("registers IMAGE_DESCRIPTION in Cerebras mode when an explicit vision base URL is set", async () => {
     const { runtime, registeredModelTypes } = buildRuntime({
       OPENAI_BASE_URL: "https://api.cerebras.ai/v1",
@@ -137,7 +149,10 @@ describe("plugin-openai media capability gating", () => {
 
     await openaiPlugin.init?.({}, runtime);
 
-    expect(registeredModelTypes().sort()).toEqual([...MEDIA_MODEL_TYPES].sort());
+    // TEXT_EMBEDDING and RESEARCH register in init() too, behind the xAI gate.
+    expect(registeredModelTypes().sort()).toEqual(
+      [...MEDIA_MODEL_TYPES, ModelType.TEXT_EMBEDDING, ModelType.RESEARCH].sort()
+    );
     for (const registration of registeredModels()) {
       expect(registration[2]).toBe(openaiPlugin.name);
       expect(registration[3]).toBe(openaiPlugin.priority);

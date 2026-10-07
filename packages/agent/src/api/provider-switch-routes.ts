@@ -5,14 +5,19 @@
  * disk in plaintext), applies the first-run connection config, saves it, and
  * drives the switch plus runtime restart through the idempotent
  * RuntimeOperationManager — reporting accepted (202), deduped, or rejected-busy
- * (409). elizacloud is handled as a cloud-managed connection.
+ * (409). elizacloud is handled as a cloud-managed connection. A provider that
+ * needs both model tiers chosen (xAI Grok) is refused with 400 MODEL_REQUIRED;
+ * it switches through /api/model-settings/activate.
  */
 import type http from "node:http";
 import { logger } from "@elizaos/core";
 import type { ReadJsonBodyOptions } from "@elizaos/shared";
 import {
+  getFirstRunProviderOption,
+  isActivatableModelProviderId,
   normalizeFirstRunProviderId,
   PostProviderSwitchRequestSchema,
+  providerRequiresModelSelection,
   resolveDevCloudEnvAuthority,
 } from "@elizaos/shared";
 import type { SecretsManager } from "@elizaos/vault";
@@ -93,6 +98,23 @@ export async function handleProviderSwitchRoutes(
     const normalizedProvider = normalizeFirstRunProviderId(body.provider);
     if (!normalizedProvider) {
       error(res, "Invalid provider", 400);
+      return true;
+    }
+    // This route carries no model tiers, so a provider with no built-in model
+    // ids can never be activated through it without falling back to another
+    // provider's ids.
+    if (
+      isActivatableModelProviderId(normalizedProvider) &&
+      providerRequiresModelSelection(normalizedProvider)
+    ) {
+      json(
+        res,
+        {
+          error: `${getFirstRunProviderOption(normalizedProvider)?.name ?? normalizedProvider} has no default models; choose a small and a large model on the Models page (POST /api/model-settings/activate).`,
+          code: "MODEL_REQUIRED",
+        },
+        400,
+      );
       return true;
     }
 

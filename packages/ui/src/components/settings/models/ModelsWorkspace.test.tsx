@@ -151,7 +151,68 @@ describe("ModelsSettingsSection", () => {
     expect(
       await screen.findByText(/No model provider is set up yet/),
     ).toBeTruthy();
+    expect(screen.getByTestId("models-active-card").textContent).toContain(
+      "Not configured",
+    );
     expect(screen.queryByTestId("models-picker")).toBeNull();
+  });
+
+  it("labels each tier with its own source and a checked connection", async () => {
+    const base = statusFixture();
+    render(
+      <ModelsSettingsSection
+        api={fixtureApi({
+          getModelSettings: vi.fn(async () =>
+            statusFixture({
+              active: {
+                ...base.active,
+                provider: "grok",
+                providerLabel: "xAI Grok",
+                smallModel: null,
+                smallModelSource: "unknown",
+                largeModel: "grok-4",
+                largeModelSource: "user",
+                health: {
+                  state: "unreachable",
+                  checkedAt: "2026-10-07T00:00:00.000Z",
+                  detail: "connect ETIMEDOUT",
+                },
+              },
+            }),
+          ),
+        })}
+      />,
+    );
+    const card = await screen.findByTestId("models-active-card");
+    expect(card.textContent).toContain("Not chosen");
+    expect(card.textContent).not.toContain("Provider default");
+    expect(card.textContent).toContain("Chosen here");
+    expect(card.textContent).toContain("Not reported");
+    expect(screen.getByTestId("models-active-health").textContent).toBe(
+      "Unreachable",
+    );
+    expect(card.textContent).toContain("connect ETIMEDOUT");
+  });
+
+  it("omits the connection row until the provider has been checked", async () => {
+    render(<ModelsSettingsSection api={fixtureApi()} />);
+    await screen.findByTestId("models-active-card");
+    expect(screen.queryByTestId("models-active-health")).toBeNull();
+  });
+
+  it("describes a load failure without a message in the UI language", async () => {
+    render(
+      <ModelsSettingsSection
+        api={fixtureApi({
+          getModelSettings: vi.fn(async () => {
+            throw new Error("   ");
+          }),
+        })}
+      />,
+    );
+    expect((await screen.findByTestId("models-error")).textContent).toContain(
+      "Could not load model settings.",
+    );
   });
 
   it("shows a load error with a working retry", async () => {
@@ -205,7 +266,8 @@ describe("ModelsSettingsSection", () => {
         .disabled,
     ).toBe(true);
     expect(screen.queryByTestId("models-picker")).toBeNull();
-    expect(screen.queryByTestId("provider-switcher-stub")).toBeNull();
+    // The account, voice, and advanced groups stay; they lock themselves.
+    expect(screen.getByTestId("provider-switcher-stub")).toBeTruthy();
   });
 
   it("switches to Grok only after both tiers are chosen and the restart is confirmed", async () => {

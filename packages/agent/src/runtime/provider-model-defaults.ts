@@ -5,12 +5,21 @@
  *
  * Seeding order matters: every default here is set-if-missing, so explicit
  * operator config (env or character settings folded into env) always wins.
- * The one deliberate override is `applyDirectProviderModelEnv`: models the
- * owner picked for a direct provider in `serviceRouting.llmText` are mapped to
- * that provider plugin's env keys and replace earlier values.
+ * The one deliberate override is the direct-provider model selection: models
+ * the owner picked for a direct provider in `serviceRouting.llmText` are
+ * mapped to that provider plugin's env keys and replace earlier values.
+ *
+ * `resolveDirectProviderModelSelection` is the single gate every text route
+ * passes at boot and on activation. A provider with no built-in model ids
+ * (xAI Grok) is only runnable with both tiers chosen; without them the route
+ * is `models-required`, nothing is projected, and boot neither pins the
+ * provider nor lets the account pool point the OpenAI-compatible plugin at
+ * it, so another provider's default ids are never sent to its endpoint.
  */
+import { ElizaError } from "@elizaos/core";
 import {
   DEFAULT_CEREBRAS_TEXT_MODEL,
+  MODEL_REQUIRED_PROVIDER_IDS,
   normalizeFirstRunProviderId,
   resolveServiceRoutingInConfig,
 } from "@elizaos/shared";
@@ -166,20 +175,116 @@ export function resolveDirectProviderModelEnv(config: {
   return { provider, smallKey: keys.small, largeKey: keys.large, assignments };
 }
 
+export type DirectProviderModelTier = "smallModel" | "largeModel";
+
+/** Outcome of the direct-provider model gate for the configured text route. */
+export type DirectProviderModelSelection =
+  | { state: "not-direct" }
+  | { state: "ready"; env: DirectProviderModelEnv }
+  | {
+      state: "models-required";
+      provider: string;
+      missingTiers: DirectProviderModelTier[];
+      /** Typed `PROVIDER_MODELS_REQUIRED` failure boot reports on the runtime. */
+      error: ElizaError;
+    };
+
+function requiresModelSelection(provider: string): boolean {
+  return (MODEL_REQUIRED_PROVIDER_IDS as readonly string[]).includes(provider);
+}
+
 /**
- * Write the owner's direct-provider model selection into `env`. Boot calls it
- * for `process.env` and for the in-memory `config.env` that feeds runtime
- * settings (which plugins read before `process.env`); activation calls it
- * after persisting a new selection.
+ * Pure: classify the configured direct text route. `ready` carries the env
+ * assignments to project; `models-required` means the provider has no
+ * built-in model ids and the owner has not chosen both tiers, so the route
+ * cannot run and must not be pinned or projected.
+ */
+export function resolveDirectProviderModelSelection(config: {
+  serviceRouting?: unknown;
+}): DirectProviderModelSelection {
+  const resolved = resolveDirectProviderModelEnv(config);
+  if (!resolved) return { state: "not-direct" };
+  if (requiresModelSelection(resolved.provider)) {
+    const missingTiers: DirectProviderModelTier[] = [];
+    if (!resolved.assignments[resolved.smallKey])
+      missingTiers.push("smallModel");
+    if (!resolved.assignments[resolved.largeKey])
+      missingTiers.push("largeModel");
+    if (missingTiers.length > 0) {
+      return {
+        state: "models-required",
+        provider: resolved.provider,
+        missingTiers,
+        error: new ElizaError(
+          `[provider-models] ${resolved.provider} is the text provider but has no ${missingTiers.join(" or ")}; choose both models from its catalog on the Models page. The provider stays unloaded until then.`,
+          {
+            code: "PROVIDER_MODELS_REQUIRED",
+            context: { provider: resolved.provider, missingTiers },
+            severity: "ephemeral",
+          },
+        ),
+      };
+    }
+  }
+  return { state: "ready", env: resolved };
+}
+
+/**
+ * Write the owner's direct-provider model selection into `env`. Activation
+ * calls it after persisting a new selection. A route that is not `ready`
+ * writes nothing.
  */
 export function applyDirectProviderModelEnv(
   config: { serviceRouting?: unknown },
   env: Record<string, unknown>,
 ): DirectProviderModelEnv | null {
-  const resolved = resolveDirectProviderModelEnv(config);
-  if (!resolved) return null;
-  for (const [key, value] of Object.entries(resolved.assignments)) {
+  const selection = resolveDirectProviderModelSelection(config);
+  if (selection.state !== "ready") return null;
+  for (const [key, value] of Object.entries(selection.env.assignments)) {
     env[key] = value;
   }
-  return resolved;
+  return selection.env;
+}
+
+/**
+ * Boot projection of the direct-provider model selection. Plugins read
+ * runtime settings (built from `config.env`) before `process.env`, so a
+ * `ready` selection is written to both sinks; any other state writes neither.
+ */
+export function projectDirectProviderModelSelection(
+  config: { serviceRouting?: unknown; env?: unknown },
+  processEnv: Record<string, unknown>,
+): DirectProviderModelSelection {
+  const selection = resolveDirectProviderModelSelection(config);
+  if (selection.state !== "ready") return selection;
+  const configEnv =
+    config.env && typeof config.env === "object" && !Array.isArray(config.env)
+      ? (config.env as Record<string, unknown>)
+      : {};
+  config.env = configEnv;
+  for (const [key, value] of Object.entries(selection.env.assignments)) {
+    processEnv[key] = value;
+    configEnv[key] = value;
+  }
+  return selection;
+}
+
+/**
+ * Backend the account pool treats as the active text route when it exports
+ * credentials. A `models-required` route has none, so the pool exports no
+ * OpenAI-compatible alias (`OPENAI_API_KEY` + `OPENAI_BASE_URL`) that would
+ * point the OpenAI plugin and its default model ids at that provider.
+ */
+export function resolveAccountPoolActiveBackend(config: {
+  serviceRouting?: unknown;
+}): string | undefined {
+  if (resolveDirectProviderModelSelection(config).state === "models-required") {
+    return undefined;
+  }
+  const backend = resolveServiceRoutingInConfig(
+    config as Record<string, unknown>,
+  )?.llmText?.backend;
+  return typeof backend === "string" && backend.trim().length > 0
+    ? backend
+    : undefined;
 }

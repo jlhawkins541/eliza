@@ -72,10 +72,10 @@ import {
   installProcessSignalHandlers,
 } from "./process-lifecycle.ts";
 import {
-  applyDirectProviderModelEnv,
   applyProviderModelEnvDefaults,
   isLikelyOpenAiTextModel,
-  resolveDirectProviderModelEnv,
+  projectDirectProviderModelSelection,
+  resolveAccountPoolActiveBackend,
   setEnvIfMissing,
 } from "./provider-model-defaults.ts";
 import { hydrateSelectedProviderCredentialFromVault } from "./provider-vault-credential.ts";
@@ -262,6 +262,7 @@ import {
 } from "./deferred-boot-owner.ts";
 import { markDeferredBootPhase } from "./deferred-boot-status.ts";
 import {
+  resolveBootTextProvider,
   resolvePreferredProviderId,
   resolvePreferredProviderPluginName,
   resolvePrimaryModel,
@@ -4319,9 +4320,7 @@ export async function startEliza(
       const accountPool = await importAppCoreRuntime();
       accountPool.getDefaultAccountPool();
       await accountPool.applyAccountPoolApiCredentials({
-        activeBackend: resolveServiceRoutingInConfig(
-          config as Record<string, unknown>,
-        )?.llmText?.backend,
+        activeBackend: resolveAccountPoolActiveBackend(config),
         accountStrategies: (
           config as Record<string, unknown> & {
             accountStrategies?: Record<string, unknown>;
@@ -4453,9 +4452,10 @@ export async function startEliza(
   }
 
   const primaryModel = resolvePrimaryModel(config);
-  const preferredProviderId = resolvePreferredProviderId(config);
-  const preferredProviderPluginName =
-    resolvePreferredProviderPluginName(config);
+  // A text route the direct-provider model gate rejects (Grok without both
+  // models) pins nothing; the failure is reported once the runtime exists.
+  const bootTextProvider = resolveBootTextProvider(config);
+  const { preferredProviderId, preferredProviderPluginName } = bootTextProvider;
 
   // 4. Ensure workspace exists with required files
   const workspaceDir =
@@ -4542,14 +4542,9 @@ export async function startEliza(
   // embedding warmup: that path is skipped on mobile and can run after the
   // text provider is already initialized.
   applyProviderModelEnvDefaults();
-  // The owner's direct-provider model choice replaces the defaults above.
-  // Plugins read runtime settings (built from config.env) before process.env,
-  // so the selection is applied to both sinks.
-  applyDirectProviderModelEnv(config, process.env);
-  if (resolveDirectProviderModelEnv(config)) {
-    config.env ??= {};
-    applyDirectProviderModelEnv(config, config.env as Record<string, unknown>);
-  }
+  // The owner's direct-provider model choice replaces the defaults above, in
+  // both process.env and the config.env that feeds runtime settings.
+  projectDirectProviderModelSelection(config, process.env);
 
   // 5-pre. Per-agent EVM + Solana wallet bootstrap is DEFERRED off the boot
   // critical path: it runs after the runtime is reachable (fired fire-and-forget
@@ -4905,6 +4900,16 @@ export async function startEliza(
     runtime,
     devCloudRuntimeSettingsAuthorityOverlay,
   );
+  if (bootTextProvider.modelSelection.state === "models-required") {
+    runtime.reportError(
+      "eliza.directProviderModels",
+      bootTextProvider.modelSelection.error,
+      {
+        provider: bootTextProvider.modelSelection.provider,
+        missingTiers: bootTextProvider.modelSelection.missingTiers,
+      },
+    );
+  }
   opts?.onRuntimeCreated?.(runtime);
   opts?.abortSignal?.throwIfAborted();
 

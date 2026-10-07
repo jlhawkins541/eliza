@@ -122,7 +122,8 @@ describe("status and catalog DTOs", () => {
         runtimeProviderName: "openai",
         smallModel: "gpt-5.6-luna",
         largeModel: "gpt-5.6-sol",
-        modelSource: "provider-default",
+        smallModelSource: "user",
+        largeModelSource: "provider-default",
         endpoint: {
           url: "https://api.openai.com/v1",
           isDefault: true,
@@ -138,6 +139,33 @@ describe("status and catalog DTOs", () => {
     expect(ModelSettingsStatusSchema.safeParse(status).success).toBe(true);
     const { managedByCloud: _omitted, ...incomplete } = status;
     expect(ModelSettingsStatusSchema.safeParse(incomplete).success).toBe(false);
+    const { largeModelSource: _tier, ...oneTierSource } = status.active;
+    expect(
+      ModelSettingsStatusSchema.safeParse({ ...status, active: oneTierSource })
+        .success,
+    ).toBe(false);
+  });
+
+  it("represents an unconfigured provider label as null, not a display string", () => {
+    const unconfigured = {
+      active: {
+        provider: "other",
+        providerLabel: null,
+        runtimeProviderName: null,
+        smallModel: null,
+        largeModel: null,
+        smallModelSource: "unknown",
+        largeModelSource: "unknown",
+        endpoint: null,
+        health: unchecked,
+      },
+      providers: [],
+      operation: null,
+      managedByCloud: false,
+    };
+    expect(ModelSettingsStatusSchema.safeParse(unconfigured).success).toBe(
+      true,
+    );
   });
 
   it("never represents an unreachable catalog as an empty model list", () => {

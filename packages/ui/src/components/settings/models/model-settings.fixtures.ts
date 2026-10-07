@@ -121,7 +121,8 @@ export function statusFixture(
       runtimeProviderName: "openai",
       smallModel: "gpt-5.6-luna",
       largeModel: "gpt-5.6-sol",
-      modelSource: "environment",
+      smallModelSource: "environment",
+      largeModelSource: "environment",
       endpoint: {
         url: "https://api.openai.com/v1",
         isDefault: true,
@@ -142,11 +143,12 @@ export function unconfiguredStatusFixture(): ModelSettingsStatusDto {
   return statusFixture({
     active: {
       provider: "other",
-      providerLabel: "Not configured",
+      providerLabel: null,
       runtimeProviderName: null,
       smallModel: null,
       largeModel: null,
-      modelSource: "unknown",
+      smallModelSource: "unknown",
+      largeModelSource: "unknown",
       endpoint: null,
       health: UNCHECKED,
     },

@@ -169,13 +169,19 @@ export const ActiveModelSchema = z
      * this page does not switch (for example DeepSeek or a subscription).
      */
     provider: z.union([z.enum(MODEL_PROVIDER_IDS), z.literal("other")]),
-    providerLabel: z.string(),
+    /**
+     * Display name of the text provider; null when no text provider is
+     * configured (the client renders its own localized "not configured").
+     */
+    providerLabel: z.string().nullable(),
     /** `ELIZA_BRAIN_PROVIDER` on the live runtime; null when not pinned. */
     runtimeProviderName: z.string().nullable(),
     /** Effective small model id; null when no id can be determined. */
     smallModel: z.string().nullable(),
     largeModel: z.string().nullable(),
-    modelSource: ActiveModelSourceSchema,
+    /** Where each tier's id comes from; the tiers can differ. */
+    smallModelSource: ActiveModelSourceSchema,
+    largeModelSource: ActiveModelSourceSchema,
     endpoint: EndpointStatusSchema.nullable(),
     health: ProviderHealthSchema,
   })

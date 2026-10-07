@@ -6,7 +6,8 @@
  * defaulted. Activation restarts the agent server-side, so while a provider
  * switch is pending or applying the hook polls status. A poll that fails during
  * that restart keeps the last good status and reports `reconnecting` instead
- * of replacing the page with an error.
+ * of replacing the page with an error. An error without a message of its own
+ * is described in the active UI language.
  */
 
 import type {
@@ -18,6 +19,7 @@ import type {
 } from "@elizaos/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, client } from "../../../api";
+import { useTranslation } from "../../../state/TranslationContext.hooks";
 
 /** The client surface this hook needs; injectable for tests and stories. */
 export interface ModelSettingsApi {
@@ -80,6 +82,9 @@ function operationInFlight(status: ModelSettingsLoadState): boolean {
 export function useModelSettings(
   api: ModelSettingsApi = client,
 ): ModelSettingsController {
+  const { t } = useTranslation();
+  const tRef = useRef(t);
+  tRef.current = t;
   const [status, setStatus] = useState<ModelSettingsLoadState>({
     state: "loading",
   });
@@ -117,7 +122,12 @@ export function useModelSettings(
         }
         setStatus({
           state: "error",
-          message: describeError(error, "Could not load model settings."),
+          message: describeError(
+            error,
+            tRef.current("models.fallback.load", {
+              defaultValue: "Could not load model settings.",
+            }),
+          ),
           ownerOnly: isOwnerOnlyError(error),
         });
       }
@@ -181,7 +191,12 @@ export function useModelSettings(
             ...current,
             [provider]: {
               state: "error",
-              message: describeError(error, "Could not load models."),
+              message: describeError(
+                error,
+                tRef.current("models.fallback.catalog", {
+                  defaultValue: "Could not load models.",
+                }),
+              ),
             },
           }));
         },
@@ -210,7 +225,12 @@ export function useModelSettings(
             state: "error",
             provider: request.provider,
             code: error instanceof ApiError ? (error.code ?? null) : null,
-            message: describeError(error, "Could not switch the provider."),
+            message: describeError(
+              error,
+              tRef.current("models.fallback.activate", {
+                defaultValue: "Could not switch the provider.",
+              }),
+            ),
           });
         },
       );

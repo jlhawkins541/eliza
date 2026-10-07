@@ -21,7 +21,9 @@
  *
  * The Models-page providers switch through the shared ModelSettingsService
  * activation (credential, model-tier, and operation-manager paths covered
- * here); a key supplied in chat keeps the legacy config-only path.
+ * here). xAI Grok, which has no default models, always takes that activation:
+ * a chat-supplied key or legacy model slots for it are refused before the
+ * store is touched.
  *
  * Deterministic: real config store on a temp dir, stub runtime, no live model.
  */
@@ -268,6 +270,39 @@ describe("SETTINGS update_ai_provider — persists to the real config store", ()
     expect(result.data?.error).toBe("MODEL_REQUIRED");
     expect(fs.readFileSync(configPath, "utf-8")).toBe(before);
   });
+
+  it.each([
+    ["an API key", { apiKey: "xai-chat-key-0000" }, "API_KEY_NOT_ACCEPTED"],
+    [
+      "an API key with both tiers",
+      {
+        apiKey: "xai-chat-key-0000",
+        smallModel: "grok-4-fast",
+        largeModel: "grok-4",
+      },
+      "API_KEY_NOT_ACCEPTED",
+    ],
+    [
+      "legacy modelConfigs",
+      { modelConfigs: { small: "grok-4-fast", large: "grok-4" } },
+      "MODEL_SELECTION_UNSUPPORTED",
+    ],
+    ["no model tiers", {}, "MODEL_REQUIRED"],
+  ])(
+    "never saves a Grok route from %s on the legacy path",
+    async (_label, extra, code) => {
+      process.env.XAI_API_KEY = "xai-fixture-launch-key-5678";
+      const before = fs.readFileSync(configPath, "utf-8");
+      const result = await invoke({
+        action: "update_ai_provider",
+        provider: "grok",
+        ...extra,
+      });
+      expect(result.success).toBe(false);
+      expect(result.data?.error).toBe(code);
+      expect(fs.readFileSync(configPath, "utf-8")).toBe(before);
+    },
+  );
 
   it("rejects model tiers for providers outside the Models page", async () => {
     const before = fs.readFileSync(configPath, "utf-8");

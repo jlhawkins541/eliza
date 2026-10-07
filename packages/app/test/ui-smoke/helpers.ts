@@ -1959,7 +1959,8 @@ export async function installDefaultAppRoutes(page: Page): Promise<void> {
           runtimeProviderName: "openai",
           smallModel: "gpt-5.6-luna",
           largeModel: "gpt-5.6-sol",
-          modelSource: "environment",
+          smallModelSource: "environment",
+          largeModelSource: "environment",
           endpoint: smokeOpenAiEndpoint,
           health: smokeUnchecked,
         },
@@ -3731,29 +3732,26 @@ export async function installDefaultAppRoutes(page: Page): Promise<void> {
   // smoke server has no native inference or secrets backends, so expose their
   // real healthy-empty envelopes instead of leaking its generic 501 response
   // into otherwise unrelated route and interaction coverage.
-  await page.route(
-    "**/api/local-inference/voice-models/preferences",
-    async (route) => {
-      const method = route.request().method();
-      if (method !== "GET" && method !== "POST") {
-        await route.fallback();
-        return;
-      }
-      const preferences = {
-        autoUpdateOnWifi: true,
-        autoUpdateOnCellular: false,
-        autoUpdateOnMetered: false,
-        quietHours: [{ start: "22:00", end: "08:00" }],
-      };
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(
-          method === "GET" ? { preferences } : { ok: true, preferences },
-        ),
-      });
-    },
-  );
+  await page.route("**/api/local-inference/voice-models/preferences", async (route) => {
+    const method = route.request().method();
+    if (method !== "GET" && method !== "POST") {
+      await route.fallback();
+      return;
+    }
+    const preferences = {
+      autoUpdateOnWifi: true,
+      autoUpdateOnCellular: false,
+      autoUpdateOnMetered: false,
+      quietHours: [{ start: "22:00", end: "08:00" }],
+    };
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(
+        method === "GET" ? { preferences } : { ok: true, preferences },
+      ),
+    });
+  });
 
   await page.route("**/api/local-inference/voice-models", async (route) => {
     if (route.request().method() !== "GET") {

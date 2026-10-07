@@ -90,6 +90,7 @@ import {
   subscriptionCliCommandAvailable,
 } from "../internal/subscription-cli-process.ts";
 import { getAgentHostBridge } from "../runtime/host-bridge.ts";
+import { resolveAccountPoolActiveBackend } from "../runtime/provider-model-defaults.ts";
 
 const z = (zod as typeof zod & { z?: typeof zod }).z ?? zod;
 
@@ -1171,7 +1172,7 @@ export async function syncDirectProviderCredentials(
   const runtime = ctx.state.runtime;
   try {
     await getAgentHostBridge().applyAccountPoolApiCredentials({
-      activeBackend: serviceRouting?.llmText?.backend,
+      activeBackend: resolveAccountPoolActiveBackend(config),
       accountStrategies:
         accountStrategies && typeof accountStrategies === "object"
           ? (accountStrategies as Record<string, unknown>)

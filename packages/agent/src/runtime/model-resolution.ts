@@ -4,6 +4,8 @@
  * service-routing llmText transport/backend, falling back to a model-name hint),
  * and the plugin package that provider maps to. Returns undefined when nothing is
  * explicitly configured, so elizaOS falls back to whichever model plugin loads.
+ * `resolveBootTextProvider` is the boot-time view: it withholds the provider
+ * pin when the direct-provider model gate reports the route unrunnable.
  */
 import {
   getFirstRunProviderOption,
@@ -11,6 +13,10 @@ import {
   resolveServiceRoutingInConfig,
 } from "@elizaos/shared";
 import type { ElizaConfig } from "../config/config.ts";
+import {
+  type DirectProviderModelSelection,
+  resolveDirectProviderModelSelection,
+} from "./provider-model-defaults.ts";
 
 function trimEnvString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -88,4 +94,34 @@ export function resolvePreferredProviderPluginName(
   return providerId
     ? getFirstRunProviderOption(providerId)?.pluginName
     : undefined;
+}
+
+/** Text provider boot pins, after the direct-provider model gate. */
+export interface BootTextProvider {
+  /** Provider id boot pins (`MODEL_PROVIDER`); undefined when nothing is pinned. */
+  preferredProviderId: string | undefined;
+  /** Plugin boot force-includes, boosts, and names in `ELIZA_BRAIN_PROVIDER`. */
+  preferredProviderPluginName: string | undefined;
+  modelSelection: DirectProviderModelSelection;
+}
+
+/**
+ * Resolve what boot pins as the text provider. A `models-required` route pins
+ * nothing: the provider plugin is not boosted or named as the brain, and the
+ * caller reports `modelSelection.error` once the runtime exists.
+ */
+export function resolveBootTextProvider(config: ElizaConfig): BootTextProvider {
+  const modelSelection = resolveDirectProviderModelSelection(config);
+  if (modelSelection.state === "models-required") {
+    return {
+      preferredProviderId: undefined,
+      preferredProviderPluginName: undefined,
+      modelSelection,
+    };
+  }
+  return {
+    preferredProviderId: resolvePreferredProviderId(config),
+    preferredProviderPluginName: resolvePreferredProviderPluginName(config),
+    modelSelection,
+  };
 }

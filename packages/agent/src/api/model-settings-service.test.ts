@@ -30,11 +30,14 @@ import type {
 } from "../runtime/operations/types.ts";
 import type { ProviderCatalogProbe } from "./model-provider-helpers.ts";
 import {
+  type AccountPoolSelector,
+  isProviderPluginInstalled,
   type ModelCatalogFetcher,
   ModelSettingsService,
   type ModelSettingsServiceDeps,
   readProviderCredential,
   type StoredProviderCredential,
+  selectPooledCredential,
 } from "./model-settings-service.ts";
 
 const ENV_KEYS = [
@@ -194,8 +197,10 @@ describe("ModelSettingsService.getStatus", () => {
     expect(status.active).toMatchObject({
       provider: "openai",
       providerLabel: "OpenAI",
+      smallModel: null,
+      smallModelSource: "provider-default",
       largeModel: "gpt-5.6-sol",
-      modelSource: "user",
+      largeModelSource: "user",
       health: { state: "unchecked", checkedAt: null, detail: null },
     });
     const byId = new Map(status.providers.map((entry) => [entry.id, entry]));
@@ -232,12 +237,110 @@ describe("ModelSettingsService.getStatus", () => {
     const status = await service.getStatus({ config: {}, runtime: null });
     expect(status.active).toMatchObject({
       provider: "other",
-      providerLabel: "Not configured",
+      providerLabel: null,
       smallModel: null,
       largeModel: null,
-      modelSource: "unknown",
+      smallModelSource: "unknown",
+      largeModelSource: "unknown",
     });
     expect(status.managedByCloud).toBe(true);
+  });
+});
+
+describe("active model sources", () => {
+  function statusFor(config: ElizaConfig) {
+    return new ModelSettingsService({
+      operations: null,
+      saveConfig: () => {},
+      readCredential: credentials({}),
+      isPluginInstalled: () => true,
+      isCloudProvisioned: () => false,
+    }).getStatus({ config, runtime: null });
+  }
+
+  it("attributes each tier to its own source", async () => {
+    process.env.ANTHROPIC_SMALL_MODEL = "claude-haiku-4-5";
+    const { active } = await statusFor(
+      directConfig("anthropic", { largeModel: "claude-opus-4-8" }),
+    );
+    expect(active).toMatchObject({
+      smallModel: "claude-haiku-4-5",
+      smallModelSource: "environment",
+      largeModel: "claude-opus-4-8",
+      largeModelSource: "user",
+    });
+  });
+
+  it("marks an Eliza Cloud tier that falls back to the default as provider-default", async () => {
+    const { active } = await statusFor({
+      serviceRouting: {
+        llmText: {
+          backend: "elizacloud",
+          transport: "cloud-proxy",
+          smallModel: "cloud-small-pick",
+        },
+      },
+    } as ElizaConfig);
+    expect(active.provider).toBe("elizacloud");
+    expect(active.smallModelSource).toBe("user");
+    expect(active.smallModel).toBe("cloud-small-pick");
+    expect(active.largeModelSource).toBe("provider-default");
+    expect(active.largeModel).not.toBeNull();
+  });
+
+  it("never attributes the shared OpenAI-compatible env to an unpicked Grok tier", async () => {
+    process.env.OPENAI_SMALL_MODEL = "gpt-5.6-luna";
+    const { active } = await statusFor(
+      directConfig("grok", { largeModel: "grok-4" }),
+    );
+    expect(active).toMatchObject({
+      smallModel: null,
+      smallModelSource: "unknown",
+      largeModel: "grok-4",
+      largeModelSource: "user",
+    });
+  });
+});
+
+describe("provider plugin presence", () => {
+  it("probes the plugin the provider catalog routes each provider through", async () => {
+    const probed: string[] = [];
+    const service = new ModelSettingsService({
+      operations: null,
+      saveConfig: () => {},
+      readCredential: credentials({}),
+      // Only the OpenAI-compatible plugin is present: Grok, which is served
+      // by it, is available; Anthropic and Ollama are not.
+      isPluginInstalled: (name) => {
+        probed.push(name);
+        return name === "@elizaos/plugin-openai";
+      },
+      isCloudProvisioned: () => false,
+    });
+    const status = await service.getStatus({ config: {}, runtime: null });
+    const installed = Object.fromEntries(
+      status.providers.map((entry) => [entry.id, entry.pluginInstalled]),
+    );
+    expect(installed).toMatchObject({
+      openai: true,
+      grok: true,
+      anthropic: false,
+      ollama: false,
+    });
+    expect(probed).toContain("@elizaos/plugin-local-inference");
+    expect(probed).toContain("@elizaos/plugin-elizacloud");
+  });
+
+  it("counts a plugin installed into the state dir through its install record", () => {
+    const pluginName = "@elizaos/plugin-model-settings-fixture";
+    const installPath = path.join(stateDir, "plugins", "installed", "fixture");
+    expect(isProviderPluginInstalled(pluginName, {})).toBe(false);
+    const config = {
+      plugins: { installs: { [pluginName]: { installPath } } },
+    } as unknown as ElizaConfig;
+    expect(isProviderPluginInstalled(pluginName, config)).toBe(false);
+    fs.mkdirSync(installPath, { recursive: true });
+    expect(isProviderPluginInstalled(pluginName, config)).toBe(true);
   });
 });
 
@@ -506,7 +609,48 @@ describe("ModelSettingsService.activate", () => {
     expect(op.status).toBe("succeeded");
   });
 
-  it("retracts the previous provider's picks so the next provider gets its defaults", async () => {
+  it("retracts the previous provider's picks from the saved config so the next boot gets defaults", async () => {
+    const state = {
+      config: {
+        ...directConfig("grok", {
+          smallModel: "grok-4-fast",
+          largeModel: "grok-4",
+        }),
+        env: {
+          OPENAI_SMALL_MODEL: "grok-4-fast",
+          OPENAI_LARGE_MODEL: "grok-4",
+        },
+      } as ElizaConfig,
+      runtime: null,
+    };
+    process.env.OPENAI_SMALL_MODEL = "grok-4-fast";
+    process.env.OPENAI_LARGE_MODEL = "grok-4";
+    const saved: ElizaConfig[] = [];
+    const service = new ModelSettingsService({
+      operations: null,
+      saveConfig: (config) => saved.push(structuredClone(config)),
+      readCredential: credentials({ openai: OPENAI_KEY }),
+      isPluginInstalled: () => true,
+      isCloudProvisioned: () => false,
+    });
+
+    const outcome = await service.activate({ provider: "openai" }, state);
+
+    expect(outcome).toEqual({ kind: "persisted", provider: "openai" });
+    expect(state.config.serviceRouting?.llmText).toEqual({
+      backend: "openai",
+      transport: "direct",
+    });
+    const savedEnv = saved[0]?.env as Record<string, unknown> | undefined;
+    expect(savedEnv?.OPENAI_SMALL_MODEL).toBeUndefined();
+    expect(savedEnv?.OPENAI_LARGE_MODEL).toBeUndefined();
+    // Headless: the loaded Grok route keeps serving until the next boot, so
+    // the live process env still names xAI models, never a mix with OpenAI.
+    expect(process.env.OPENAI_SMALL_MODEL).toBe("grok-4-fast");
+    expect(process.env.OPENAI_LARGE_MODEL).toBe("grok-4");
+  });
+
+  it("retracts the previous provider's picks from the live env before the restart", async () => {
     const state = {
       config: directConfig("grok", {
         smallModel: "grok-4-fast",
@@ -516,8 +660,9 @@ describe("ModelSettingsService.activate", () => {
     };
     process.env.OPENAI_SMALL_MODEL = "grok-4-fast";
     process.env.OPENAI_LARGE_MODEL = "grok-4";
+    const { manager, repository } = buildOperations(() => state.config);
     const service = new ModelSettingsService({
-      operations: null,
+      operations: manager,
       saveConfig: () => {},
       readCredential: credentials({ openai: OPENAI_KEY }),
       isPluginInstalled: () => true,
@@ -525,14 +670,11 @@ describe("ModelSettingsService.activate", () => {
     });
 
     const outcome = await service.activate({ provider: "openai" }, state);
+    if (outcome.kind !== "accepted") throw new Error("expected accepted");
+    await waitForTerminal(repository, outcome.operationId);
 
-    expect(outcome).toEqual({ kind: "persisted", provider: "openai" });
     expect(process.env.OPENAI_SMALL_MODEL).not.toBe("grok-4-fast");
     expect(process.env.OPENAI_LARGE_MODEL).not.toBe("grok-4");
-    expect(state.config.serviceRouting?.llmText).toEqual({
-      backend: "openai",
-      transport: "direct",
-    });
   });
 });
 
@@ -551,6 +693,7 @@ describe("readProviderCredential", () => {
           config: {},
           env,
           activeProvider: "grok",
+          pool: null,
         }),
       ).toBeNull();
       expect(
@@ -558,8 +701,113 @@ describe("readProviderCredential", () => {
           config: {},
           env: { OPENAI_API_KEY: OPENAI_KEY } as NodeJS.ProcessEnv,
           activeProvider: "anthropic",
+          pool: null,
         }),
       ).toEqual({ value: OPENAI_KEY, source: "launch-env" });
+    } finally {
+      if (previousStateDir === undefined) delete process.env.ELIZA_STATE_DIR;
+      else process.env.ELIZA_STATE_DIR = previousStateDir;
+    }
+  });
+});
+
+describe("selectPooledCredential", () => {
+  const record = (id: string, access: string, updatedAt: number) => ({
+    id,
+    updatedAt,
+    credentials: { access },
+  });
+  const records = [
+    record("acct-old", "sk-old-key-1111", 1),
+    record("acct-new", "sk-new-key-2222", 2),
+  ];
+
+  function pool(
+    linked: Array<{ id: string; enabled?: boolean }>,
+    activeAccountId?: string | null,
+  ): AccountPoolSelector & { strategies: unknown[] } {
+    const strategies: unknown[] = [];
+    return {
+      strategies,
+      list: () => linked,
+      ...(activeAccountId !== undefined
+        ? {
+            selectionState: (_provider: string, strategy?: unknown) => {
+              strategies.push(strategy);
+              return { activeAccountId, reason: "priority" };
+            },
+          }
+        : {}),
+    };
+  }
+
+  it("reports the account the pool would export, not the newest one", () => {
+    const selector = pool([{ id: "acct-old" }, { id: "acct-new" }], "acct-old");
+    expect(
+      selectPooledCredential("openai-api", records, selector, "round-robin"),
+    ).toBe("sk-old-key-1111");
+    expect(selector.strategies).toEqual(["round-robin"]);
+  });
+
+  it("reports nothing when the pool would export no account (all disabled)", () => {
+    expect(
+      selectPooledCredential(
+        "openai-api",
+        records,
+        pool(
+          [
+            { id: "acct-old", enabled: false },
+            { id: "acct-new", enabled: false },
+          ],
+          null,
+        ),
+        "priority",
+      ),
+    ).toBeNull();
+  });
+
+  it("skips disabled and unlinked accounts on a host without a selection dry run", () => {
+    expect(
+      selectPooledCredential(
+        "openai-api",
+        records,
+        pool([{ id: "acct-old" }, { id: "acct-new", enabled: false }]),
+        "priority",
+      ),
+    ).toBe("sk-old-key-1111");
+    expect(
+      selectPooledCredential("openai-api", records, pool([]), "priority"),
+    ).toBeNull();
+  });
+});
+
+describe("readProviderCredential without stored accounts", () => {
+  it("falls back to launch env only where the pool would", () => {
+    const previousStateDir = process.env.ELIZA_STATE_DIR;
+    process.env.ELIZA_STATE_DIR = stateDir;
+    const emptyPool: AccountPoolSelector = {
+      list: () => [],
+      selectionState: () => ({ activeAccountId: null, reason: null }),
+    };
+    try {
+      for (const pool of [null, emptyPool]) {
+        expect(
+          readProviderCredential("grok", {
+            config: {},
+            env: { XAI_API_KEY: XAI_KEY } as NodeJS.ProcessEnv,
+            activeProvider: "grok",
+            pool,
+          }),
+        ).toEqual({ value: XAI_KEY, source: "launch-env" });
+        expect(
+          readProviderCredential("anthropic", {
+            config: {},
+            env: {} as NodeJS.ProcessEnv,
+            activeProvider: "openai",
+            pool,
+          }),
+        ).toBeNull();
+      }
     } finally {
       if (previousStateDir === undefined) delete process.env.ELIZA_STATE_DIR;
       else process.env.ELIZA_STATE_DIR = previousStateDir;

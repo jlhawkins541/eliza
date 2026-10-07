@@ -4,12 +4,14 @@
  * response-handler, action-planner), embeddings, tokenizer, image
  * generation/description, transcription, TTS, and deep research.
  *
- * Text/embedding/tokenizer/research handlers register statically via `models`.
- * The media handlers (IMAGE, IMAGE_DESCRIPTION, TRANSCRIPTION, TEXT_TO_SPEECH)
- * register in `init()` through `registerMediaModels`, which skips them in
- * Cerebras mode unless a per-capability endpoint override points at a server
- * that serves them. `tests` carries the live connectivity/round-trip suite the
- * plugin loader runs against a real endpoint.
+ * Text and tokenizer handlers register statically via `models`. The handlers
+ * whose endpoint or default model id is OpenAI-specific (IMAGE,
+ * IMAGE_DESCRIPTION, TRANSCRIPTION, TEXT_TO_SPEECH, TEXT_EMBEDDING, RESEARCH)
+ * register in `init()` through `registerMediaModels`, which skips the media
+ * ones in Cerebras mode and all of them against xAI unless a per-capability
+ * override makes the request valid there. `tests` carries the live
+ * connectivity/round-trip suite the plugin loader runs against a real
+ * endpoint.
  */
 import type {
   TextToSpeechParams as CoreTextToSpeechParams,
@@ -52,6 +54,7 @@ import {
   getSetting,
   isBrowser,
   isCerebrasMode,
+  isXaiMode,
 } from "./utils/config";
 
 function getProcessEnv(): ProcessEnvLike {
@@ -88,6 +91,27 @@ const mediaModelOverrideKeys: Record<string, readonly string[]> = {
   [ModelType.IMAGE_DESCRIPTION]: ["OPENAI_IMAGE_DESCRIPTION_BASE_URL"],
 };
 
+// xAI serves its own model ids only, and the defaults for these capabilities
+// (dall-e-3, gpt-5-mini, gpt-5-mini-transcribe, gpt-5-mini-tts,
+// text-embedding-3-small, o3-deep-research) are OpenAI-only. Against xAI a
+// capability registers only when the owner set its endpoint (so the request
+// leaves xAI) or its model id (so no OpenAI-only default is sent).
+const xaiModelOverrideKeys: Record<string, readonly string[]> = {
+  [ModelType.IMAGE]: ["OPENAI_IMAGE_MODEL"],
+  [ModelType.IMAGE_DESCRIPTION]: [
+    "OPENAI_IMAGE_DESCRIPTION_BASE_URL",
+    "OPENAI_IMAGE_DESCRIPTION_MODEL",
+  ],
+  [ModelType.TRANSCRIPTION]: ["OPENAI_TRANSCRIPTION_MODEL"],
+  [ModelType.TEXT_TO_SPEECH]: ["OPENAI_TTS_MODEL"],
+  [ModelType.TEXT_EMBEDDING]: [
+    "OPENAI_EMBEDDING_URL",
+    "OPENAI_BROWSER_EMBEDDING_URL",
+    "OPENAI_EMBEDDING_MODEL",
+  ],
+  [ModelType.RESEARCH]: ["OPENAI_RESEARCH_MODEL"],
+};
+
 const mediaModels: NonNullable<Plugin["models"]> = {
   [ModelType.IMAGE]: async (
     runtime: IAgentRuntime,
@@ -118,6 +142,24 @@ const mediaModels: NonNullable<Plugin["models"]> = {
   },
 };
 
+// Not media, but registered alongside it so the xAI gate applies. Cerebras
+// keeps both: embeddings fall back to a local hash there (models/embedding.ts).
+const endpointDefaultModels: NonNullable<Plugin["models"]> = {
+  [ModelType.TEXT_EMBEDDING]: async (
+    runtime: IAgentRuntime,
+    params: TextEmbeddingParams | string | null
+  ): Promise<number[]> => {
+    return handleTextEmbedding(runtime, params);
+  },
+
+  [ModelType.RESEARCH]: async (
+    runtime: IAgentRuntime,
+    params: ResearchParams
+  ): Promise<ResearchResult> => {
+    return handleResearch(runtime, params);
+  },
+};
+
 // Cerebras serves text models only: vision chat completions, /audio/transcriptions,
 // /audio/speech, and /images/generations all fail against its endpoint. Mirror the
 // embedding shouldUseLocalEmbeddingFallback gate (models/embedding.ts): in Cerebras
@@ -127,13 +169,33 @@ const mediaModels: NonNullable<Plugin["models"]> = {
 // on every attachment.
 export function registerMediaModels(runtime: IAgentRuntime): void {
   const cerebras = isCerebrasMode(runtime);
+  const xai = !cerebras && isXaiMode(runtime);
   const registrations: Array<Parameters<typeof registerProviderModels>[2][number]> = [];
-  for (const [modelType, handler] of Object.entries(mediaModels)) {
+  const gated = [
+    ...Object.entries(mediaModels).map(([modelType, handler]) => ({
+      modelType,
+      handler,
+      cerebrasGated: true,
+    })),
+    ...Object.entries(endpointDefaultModels).map(([modelType, handler]) => ({
+      modelType,
+      handler,
+      cerebrasGated: false,
+    })),
+  ];
+  for (const { modelType, handler, cerebrasGated } of gated) {
     if (
       cerebras &&
+      cerebrasGated &&
       !hasExplicitCapabilityOverride(runtime, mediaModelOverrideKeys[modelType] ?? [])
     ) {
       logger.info(`[OpenAI] Not registering ${modelType}: the Cerebras endpoint does not serve it`);
+      continue;
+    }
+    if (xai && !hasExplicitCapabilityOverride(runtime, xaiModelOverrideKeys[modelType] ?? [])) {
+      logger.info(
+        `[OpenAI] Not registering ${modelType}: its default model id is OpenAI-only and the endpoint is xAI`
+      );
       continue;
     }
     registrations.push({
@@ -235,13 +297,6 @@ export const openaiPlugin: Plugin = {
   },
 
   models: {
-    [ModelType.TEXT_EMBEDDING]: async (
-      runtime: IAgentRuntime,
-      params: TextEmbeddingParams | string | null
-    ): Promise<number[]> => {
-      return handleTextEmbedding(runtime, params);
-    },
-
     [ModelType.TEXT_TOKENIZER_ENCODE]: async (
       runtime: IAgentRuntime,
       params: TokenizeTextParams
@@ -305,16 +360,10 @@ export const openaiPlugin: Plugin = {
       return handleActionPlanner(runtime, params);
     },
 
-    // IMAGE / IMAGE_DESCRIPTION / TRANSCRIPTION / TEXT_TO_SPEECH are registered
-    // in init() via registerMediaModels so registration can be gated on the
-    // resolved endpoint actually serving them (see Cerebras gate above).
-
-    [ModelType.RESEARCH]: async (
-      runtime: IAgentRuntime,
-      params: ResearchParams
-    ): Promise<ResearchResult> => {
-      return handleResearch(runtime, params);
-    },
+    // IMAGE / IMAGE_DESCRIPTION / TRANSCRIPTION / TEXT_TO_SPEECH /
+    // TEXT_EMBEDDING / RESEARCH are registered in init() via registerMediaModels
+    // so registration can be gated on the resolved endpoint (see the Cerebras
+    // and xAI gates above).
   },
 
   tests: [

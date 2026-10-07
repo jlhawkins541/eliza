@@ -126,7 +126,6 @@ export async function handleModelSettingsRoutes(
   }
 
   const service = () => new ModelSettingsService(ctx.serviceDeps());
-  // error-policy:J1 every service failure becomes a structured HTTP response.
   try {
     if (pathname === MODEL_SETTINGS_ROUTE_PREFIX) {
       if (method !== "GET") {
@@ -204,6 +203,7 @@ export async function handleModelSettingsRoutes(
     sendError(ctx, 404, "NOT_FOUND", "Unknown model settings route.");
     return true;
   } catch (err) {
+    // error-policy:J1 every service failure becomes a structured HTTP response.
     sendServiceError(ctx, err);
     return true;
   }

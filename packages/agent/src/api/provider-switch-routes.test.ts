@@ -207,6 +207,38 @@ describe("handleProviderSwitchRoutes", () => {
     expect(manager.start).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["grok", undefined],
+    ["xai", "xai-route-key-1234"],
+    ["@elizaos/plugin-xai", undefined],
+  ])(
+    "refuses %s with MODEL_REQUIRED before writing config or starting an operation",
+    async (provider, apiKey) => {
+      const manager = managerReturning({
+        kind: "accepted",
+        operation: operation("op-unused"),
+      });
+      const vault = memorySecrets();
+      const { ctx, config, json, saveElizaConfig } = makeContext({
+        body: { provider, ...(apiKey ? { apiKey } : {}) },
+        manager,
+        secretsManager: vault.secrets,
+      });
+
+      await expect(handleProviderSwitchRoutes(ctx)).resolves.toBe(true);
+
+      expect(json).toHaveBeenCalledWith(
+        ctx.res,
+        expect.objectContaining({ code: "MODEL_REQUIRED" }),
+        400,
+      );
+      expect(manager.start).not.toHaveBeenCalled();
+      expect(saveElizaConfig).not.toHaveBeenCalled();
+      expect(vault.set).not.toHaveBeenCalled();
+      expect(config.serviceRouting).toBeUndefined();
+    },
+  );
+
   it("normalizes the provider, trims the idempotency key, and prepares config", async () => {
     const manager = managerReturning({
       kind: "accepted",

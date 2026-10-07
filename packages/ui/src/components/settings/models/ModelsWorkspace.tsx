@@ -17,18 +17,18 @@ import type {
   ModelProviderId,
   ModelProviderStatusDto,
   ModelSettingsStatusDto,
+  ProviderHealth,
 } from "@elizaos/shared";
+import { Brain, Cpu } from "lucide-react";
 import {
-  Brain,
-  Cloud,
-  Cpu,
-  Feather,
-  type LucideIcon,
-  Server,
-  Sparkles,
-  Zap,
-} from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+  type ComponentType,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useState,
+} from "react";
+import { cn } from "../../../lib/utils";
+import { getProviderLogo } from "../../../providers";
 import { useTranslation } from "../../../state/TranslationContext.hooks";
 import { OwnerOnlyNotice } from "../../RoleGate";
 import { Badge } from "../../ui/badge";
@@ -57,12 +57,43 @@ export interface ModelDraft {
   largeModel: string | null;
 }
 
-const PROVIDER_ICONS: Record<ModelProviderId, LucideIcon> = {
-  openai: Sparkles,
-  anthropic: Feather,
-  grok: Zap,
-  ollama: Server,
-  elizacloud: Cloud,
+type ProviderIcon = ComponentType<{
+  className?: string;
+  "aria-hidden"?: boolean;
+}>;
+
+function isDarkTheme(): boolean {
+  if (typeof document === "undefined") return true;
+  const root = document.documentElement;
+  return (
+    root.classList.contains("dark") ||
+    root.getAttribute("data-theme") === "dark"
+  );
+}
+
+/** A provider's brand mark from the shared provider-logo registry. */
+function providerLogo(provider: ModelProviderId): ProviderIcon {
+  function ProviderLogo({ className }: { className?: string }) {
+    return (
+      <img
+        src={getProviderLogo(provider, isDarkTheme())}
+        alt=""
+        aria-hidden
+        draggable={false}
+        className={cn("object-contain", className)}
+      />
+    );
+  }
+  return ProviderLogo;
+}
+
+// On-device inference has no brand mark in the registry, so it keeps a glyph.
+const PROVIDER_ICONS: Record<ModelProviderId, ProviderIcon> = {
+  openai: providerLogo("openai"),
+  anthropic: providerLogo("anthropic"),
+  grok: providerLogo("grok"),
+  ollama: providerLogo("ollama"),
+  elizacloud: providerLogo("elizacloud"),
   local: Cpu,
 };
 
@@ -206,17 +237,35 @@ function operationBanner(
   return null;
 }
 
-function modelValueLabel(value: string | null, t: Translator): string {
-  return (
-    value ??
-    t("models.active.providerDefault", { defaultValue: "Provider default" })
-  );
-}
+type ActiveModelSource = ModelSettingsStatusDto["active"]["smallModelSource"];
 
-function sourceLabel(
-  source: ModelSettingsStatusDto["active"]["modelSource"],
+function modelValueLabel(
+  value: string | null,
+  source: ActiveModelSource,
   t: Translator,
 ): string {
+  if (value) return value;
+  return source === "provider-default"
+    ? t("models.active.providerDefault", { defaultValue: "Provider default" })
+    : t("models.active.notChosen", { defaultValue: "Not chosen" });
+}
+
+function healthLabel(health: ProviderHealth, t: Translator): string | null {
+  switch (health.state) {
+    case "ok":
+      return t("models.health.ok", { defaultValue: "Responding" });
+    case "unreachable":
+      return t("models.health.unreachable", { defaultValue: "Unreachable" });
+    case "auth-failed":
+      return t("models.health.authFailed", { defaultValue: "Key rejected" });
+    case "no-models":
+      return t("models.health.noModels", { defaultValue: "No models" });
+    case "unchecked":
+      return null;
+  }
+}
+
+function sourceLabel(source: ActiveModelSource, t: Translator): string {
   switch (source) {
     case "user":
       return t("models.source.user", { defaultValue: "Chosen here" });
@@ -247,6 +296,7 @@ export function ActiveBrainCard({
     active.provider === "other" ? Brain : PROVIDER_ICONS[active.provider];
   const unconfigured =
     active.provider === "other" && active.runtimeProviderName === null;
+  const health = healthLabel(active.health, t);
   return (
     <SettingsGroup
       title={t("models.active.title", { defaultValue: "Eliza is using" })}
@@ -255,7 +305,10 @@ export function ActiveBrainCard({
       <SettingsRow
         icon={Icon}
         iconClassName="text-accent"
-        label={active.providerLabel}
+        label={
+          active.providerLabel ??
+          t("models.active.notConfigured", { defaultValue: "Not configured" })
+        }
         description={
           unconfigured
             ? t("models.active.empty", {
@@ -281,10 +334,10 @@ export function ActiveBrainCard({
             label={t("models.active.smallModel", {
               defaultValue: "Small model",
             })}
-            description={sourceLabel(active.modelSource, t)}
+            description={sourceLabel(active.smallModelSource, t)}
             control={
               <span className="break-all text-sm text-txt-strong">
-                {modelValueLabel(active.smallModel, t)}
+                {modelValueLabel(active.smallModel, active.smallModelSource, t)}
               </span>
             }
           />
@@ -292,13 +345,31 @@ export function ActiveBrainCard({
             label={t("models.active.largeModel", {
               defaultValue: "Large model",
             })}
-            description={sourceLabel(active.modelSource, t)}
+            description={sourceLabel(active.largeModelSource, t)}
             control={
               <span className="break-all text-sm text-txt-strong">
-                {modelValueLabel(active.largeModel, t)}
+                {modelValueLabel(active.largeModel, active.largeModelSource, t)}
               </span>
             }
           />
+          {health ? (
+            <SettingsRow
+              label={t("models.active.health", { defaultValue: "Connection" })}
+              description={active.health.detail}
+              control={
+                <Badge
+                  variant={
+                    active.health.state === "ok"
+                      ? "statusSuccess"
+                      : "statusWarning"
+                  }
+                  data-testid="models-active-health"
+                >
+                  {health}
+                </Badge>
+              }
+            />
+          ) : null}
           {active.endpoint ? (
             <SettingsRow
               label={t("models.active.endpoint", { defaultValue: "Endpoint" })}
@@ -723,7 +794,6 @@ export function ModelsWorkspaceView({
   providerSettings,
 }: ModelsWorkspaceViewProps) {
   const { t } = useTranslation();
-  const managedByCloud = status.state === "ready" && status.data.managedByCloud;
   return (
     <SettingsStack data-testid="models-workspace">
       <ModelsStatusContent
@@ -740,8 +810,9 @@ export function ModelsWorkspaceView({
         t={t}
       />
       {/* The account, voice, and advanced groups do not depend on this
-          status, so a failed model-settings read never hides them. */}
-      {managedByCloud ? null : providerSettings}
+          status, so a failed model-settings read never hides them. Under
+          Eliza Cloud management they keep their own read-only lock. */}
+      {providerSettings}
       <ConfirmDialog
         open={confirming}
         title={t("models.confirm.title", { defaultValue: "Switch provider?" })}
@@ -887,12 +958,13 @@ function draftFromActive(
   data: ModelSettingsStatusDto,
   provider: ModelProviderId,
 ): ModelDraft {
-  if (data.active.provider !== provider || data.active.modelSource !== "user") {
+  const { active } = data;
+  if (active.provider !== provider) {
     return { smallModel: null, largeModel: null };
   }
   return {
-    smallModel: data.active.smallModel,
-    largeModel: data.active.largeModel,
+    smallModel: active.smallModelSource === "user" ? active.smallModel : null,
+    largeModel: active.largeModelSource === "user" ? active.largeModel : null,
   };
 }
 

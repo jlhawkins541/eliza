@@ -220,10 +220,11 @@ export const VIEW_OCR_POLICIES = {
     requireAny: ["Models & Providers", "Voice", "Appearance", "Basics"],
   }),
   "builtin-models": expected({
-    // Provider tiles come from the model-settings fixture; the page title bar
-    // is shell-owned, so assert the workspace's own durable labels.
+    // Provider tiles come from the model-settings fixture. The "Models" title
+    // bar is shell-owned, so it is one accepted anchor alongside the
+    // workspace's own durable labels rather than a requirement.
     requireAll: ["OpenAI", "Anthropic", "xAI", "Ollama"],
-    requireAny: ["Eliza is using", "Switch provider"],
+    requireAny: ["Models", "Eliza is using", "Switch provider"],
   }),
   "builtin-vault": expected({
     // The shared title bar is intentionally absent; verify the visible

@@ -1,12 +1,15 @@
 /**
- * Transport contract for `/api/model-settings`: the in-handler owner gate,
- * request grammar, and the mapping of use-case outcomes to HTTP statuses.
+ * Transport contract for `/api/model-settings`: the in-handler owner gate
+ * (alone and composed with the server's caller resolution over the host
+ * bridge), request grammar, and the mapping of use-case outcomes to HTTP
+ * statuses.
  * Drives the real handler and `ModelSettingsService` with the real operation
  * manager and filesystem repository; credential storage, plugin presence, and
  * the restart closure are injected.
  */
 import fs from "node:fs";
-import type http from "node:http";
+import http from "node:http";
+import { Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -21,6 +24,7 @@ import { HealthChecker } from "../runtime/operations/health.ts";
 import { DefaultRuntimeOperationManager } from "../runtime/operations/manager.ts";
 import { FilesystemRuntimeOperationRepository } from "../runtime/operations/repository.ts";
 import { createRuntimeOperationStrategies } from "../runtime/operations/strategy-table.ts";
+import { resolveInboxRequestAuthorization } from "./inbox-request-authorization.ts";
 import {
   handleModelSettingsRoutes,
   type ModelSettingsRouteContext,
@@ -238,5 +242,124 @@ describe("model settings routes for the owner", () => {
       code: "OPERATION_IN_PROGRESS",
       activeOperationId: accepted?.body.operationId,
     });
+  });
+});
+
+describe("model settings caller resolution as the server composes it", () => {
+  const ENV = ["ELIZA_API_TOKEN", "ELIZA_REQUIRE_LOCAL_AUTH"] as const;
+  let savedAuthEnv: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    savedAuthEnv = Object.fromEntries(
+      ENV.map((key) => [key, process.env[key]]),
+    );
+    for (const key of ENV) delete process.env[key];
+  });
+
+  afterEach(() => {
+    for (const key of ENV) {
+      const value = savedAuthEnv[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  /** A remote request, so neither loopback trust nor a token makes it OWNER. */
+  function remoteRequest(
+    method: string,
+    pathname: string,
+    headers: http.IncomingHttpHeaders = {},
+  ): http.IncomingMessage {
+    const req = new http.IncomingMessage(new Socket());
+    req.method = method;
+    req.url = pathname;
+    req.headers = { host: "agent.example.test", ...headers };
+    Object.defineProperty(req.socket, "remoteAddress", {
+      configurable: true,
+      value: "203.0.113.9",
+    });
+    return req;
+  }
+
+  async function callComposed(
+    method: string,
+    pathname: string,
+    hostAuthorization: AgentHttpRequestAuthorization,
+    headers: http.IncomingHttpHeaders = {},
+  ): Promise<{ captured: Captured | null; builtService: boolean }> {
+    const req = remoteRequest(method, pathname, headers);
+    let captured: Captured | null = null;
+    let builtService = false;
+    await handleModelSettingsRoutes({
+      req,
+      res: {} as http.ServerResponse,
+      method,
+      pathname,
+      state: { config, runtime: null },
+      json: (_res, data, status = 200) => {
+        captured = { status, body: data as Record<string, unknown> };
+      },
+      readJsonBody,
+      callerAuthorization: resolveInboxRequestAuthorization(
+        req,
+        method,
+        pathname,
+        hostAuthorization,
+      ),
+      serviceDeps: () => {
+        builtService = true;
+        return {
+          operations: manager,
+          saveConfig,
+          readCredential: () => null,
+          isPluginInstalled: () => true,
+          isCloudProvisioned: () => false,
+        };
+      },
+    });
+    return { captured, builtService };
+  }
+
+  it.each([
+    ["GET", "/api/model-settings"],
+    ["GET", "/api/model-settings/providers/openai/models"],
+    ["POST", "/api/model-settings/activate"],
+  ] as const)(
+    "refuses a host-bridge USER session on %s %s before building the use-case",
+    async (method, pathname) => {
+      const { captured, builtService } = await callComposed(method, pathname, {
+        ok: true,
+        role: "USER",
+        identityId: "machine-session-1",
+      });
+      expect(captured).toMatchObject({
+        status: 403,
+        body: { code: "OWNER_REQUIRED" },
+      });
+      expect(builtService).toBe(false);
+      expect(saveConfig).not.toHaveBeenCalled();
+    },
+  );
+
+  it("answers 401 when neither the boundary nor the host bridge authenticates", async () => {
+    const { captured, builtService } = await callComposed(
+      "GET",
+      "/api/model-settings",
+      { ok: false, role: "NONE" },
+    );
+    expect(captured?.status).toBe(401);
+    expect(builtService).toBe(false);
+  });
+
+  it("treats the configured API token as the owner even when the bridge says USER", async () => {
+    process.env.ELIZA_API_TOKEN = "model-settings-route-token-1234";
+    const { captured, builtService } = await callComposed(
+      "GET",
+      "/api/model-settings",
+      { ok: true, role: "USER" },
+      { authorization: "Bearer model-settings-route-token-1234" },
+    );
+    expect(captured?.status).toBe(200);
+    expect(builtService).toBe(true);
   });
 });

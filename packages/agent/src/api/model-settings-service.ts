@@ -10,9 +10,10 @@
  * Activation writes the provider route and the chosen model tiers into
  * `serviceRouting.llmText` and runs through the runtime operation manager,
  * which restarts the runtime so the boot-time model env projection
- * (`applyDirectProviderModelEnv`) reaches the provider plugins. Without an
- * operation manager (a headless runtime with no API host) the same config
- * mutation is persisted for the next boot.
+ * (`projectDirectProviderModelSelection`) reaches the provider plugins.
+ * Without an operation manager (a headless runtime with no API host) the same
+ * config mutation is persisted for the next boot, and the running process's
+ * model env is left as it is.
  *
  * Failures are typed `ElizaError`s whose codes the route layer maps to HTTP
  * statuses; nothing here fabricates a healthy-looking default.
@@ -23,7 +24,11 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { listAccounts } from "@elizaos/auth/account-storage";
 import type { DirectAccountProvider } from "@elizaos/auth/types";
-import { ElizaError, logger } from "@elizaos/core";
+import {
+  ElizaError,
+  logger,
+  type ServiceRouteAccountStrategy,
+} from "@elizaos/core";
 import {
   type ActivatableModelProviderId,
   classifyModelEndpointTransport,
@@ -34,6 +39,7 @@ import {
   getFirstRunProviderOption,
   isCloudProvisionedContainer,
   MODEL_PROVIDER_IDS,
+  MODEL_REQUIRED_PROVIDER_IDS,
   type ModelProviderId,
   type ModelProviderStatusDto,
   type ModelSettingsOperationDto,
@@ -53,6 +59,7 @@ import {
 } from "@elizaos/shared";
 import { isMobilePlatform } from "@elizaos/shared/runtime-env";
 import type { ElizaConfig } from "../config/config.ts";
+import { getAgentHostBridge } from "../runtime/host-bridge.ts";
 import type {
   ProviderSwitchIntent,
   RuntimeOperation,
@@ -101,17 +108,22 @@ const KEYED_PROVIDER_ACCOUNT: Readonly<
 
 const XAI_API_BASE = "https://api.x.ai/v1";
 
-/** Plugin package each Models-page provider is served by. */
-const PROVIDER_PLUGIN: Readonly<Record<ModelProviderId, string>> = {
-  openai: "@elizaos/plugin-openai",
-  anthropic: "@elizaos/plugin-anthropic",
-  // xAI is OpenAI-compatible; the account pool exports its key as an
-  // OpenAI-compatible credential while Grok is the active backend.
-  grok: "@elizaos/plugin-openai",
-  ollama: "@elizaos/plugin-zerollama",
-  elizacloud: "@elizaos/plugin-elizacloud",
-  local: "@elizaos/plugin-local-inference",
-};
+/**
+ * Plugin package a Models-page provider is served by: the first-run catalog's
+ * mapping (the same one boot resolves the preferred provider plugin from), and
+ * the on-device runtime, which is not a first-run catalog provider.
+ */
+export function providerPluginName(provider: ModelProviderId): string {
+  if (provider === "local") return "@elizaos/plugin-local-inference";
+  const option = getFirstRunProviderOption(provider);
+  if (!option) {
+    throw new ElizaError(
+      `[model-settings] The provider catalog has no entry for ${provider}`,
+      { code: "MODEL_SETTINGS_PROVIDER_UNRESOLVED", context: { provider } },
+    );
+  }
+  return option.pluginName;
+}
 
 const PROVIDER_LABEL: Readonly<Record<ModelProviderId, string>> = {
   openai: "OpenAI",
@@ -165,12 +177,77 @@ function uncheckedHealth(): ProviderHealth {
   return { state: "unchecked", checkedAt: null, detail: null };
 }
 
+/** The slice of the host account pool the credential reader consults. */
+export interface AccountPoolSelector {
+  list(providerId?: string): ReadonlyArray<{ id: string; enabled?: boolean }>;
+  /** Non-mutating "which account is next" dry run; absent on older hosts. */
+  selectionState?(
+    providerId: string,
+    strategy?: ServiceRouteAccountStrategy,
+  ): { activeAccountId: string | null; reason: string | null };
+}
+
+function accountStrategy(
+  config: ElizaConfig,
+  accountProvider: DirectAccountProvider,
+): ServiceRouteAccountStrategy {
+  const strategies = (
+    config as {
+      accountStrategies?: Partial<Record<string, ServiceRouteAccountStrategy>>;
+    }
+  ).accountStrategies;
+  return strategies?.[accountProvider] ?? "priority";
+}
+
+/**
+ * The stored key of the account the pool would export for `accountProvider`:
+ * the pool's own dry-run selection (the row the Accounts panel labels
+ * active), so a disabled, unhealthy, or unlinked account is never reported.
+ * Null when the pool would export none of the stored accounts.
+ */
+export function selectPooledCredential(
+  accountProvider: DirectAccountProvider,
+  records: ReadonlyArray<{
+    id: string;
+    updatedAt: number;
+    credentials: { access: string };
+  }>,
+  pool: AccountPoolSelector,
+  strategy: ServiceRouteAccountStrategy,
+): string | null {
+  const withKey = records.filter(
+    (record) => trimmed(record.credentials.access) !== null,
+  );
+  if (pool.selectionState) {
+    const activeId = pool.selectionState(
+      accountProvider,
+      strategy,
+    ).activeAccountId;
+    const selected = withKey.find((record) => record.id === activeId);
+    return selected ? selected.credentials.access.trim() : null;
+  }
+  const enabled = new Set(
+    pool
+      .list(accountProvider)
+      .filter((account) => account.enabled !== false)
+      .map((account) => account.id),
+  );
+  const newest = withKey
+    .filter((record) => enabled.has(record.id))
+    .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  return newest ? newest.credentials.access.trim() : null;
+}
+
 /**
  * Production credential reader. The account pool is the authority for direct
- * keys; launch env is consulted only when it is not another provider's
+ * keys: a stored account counts only when the pool would export it, and only
+ * when a pool is installed at all (a host without one never exports stored
+ * accounts). Launch env is consulted only when it is not another provider's
  * OpenAI/Anthropic-compatible alias (the account pool exports the active xAI
- * key as `OPENAI_API_KEY` with an x.ai base URL, and Cloud inference reuses the
- * `*_BASE_URL` pair for its proxy).
+ * key as `OPENAI_API_KEY` with an x.ai base URL, and Cloud inference reuses
+ * the `*_BASE_URL` pair for its proxy), and for Grok only while xAI has no
+ * stored accounts, because the pool ignores launch env for its compatibility
+ * alias once accounts exist.
  */
 export function readProviderCredential(
   provider: ModelProviderId,
@@ -178,9 +255,10 @@ export function readProviderCredential(
     config: ElizaConfig;
     env: NodeJS.ProcessEnv;
     activeProvider: ModelProviderId | "other";
+    pool: AccountPoolSelector | null;
   },
 ): StoredProviderCredential | null {
-  const { config, env, activeProvider } = context;
+  const { config, env, activeProvider, pool } = context;
   if (provider === "elizacloud") {
     const cloud = config.cloud as { apiKey?: unknown } | undefined;
     const value = trimmed(cloud?.apiKey) ?? trimmed(env.ELIZAOS_CLOUD_API_KEY);
@@ -189,12 +267,17 @@ export function readProviderCredential(
   if (provider !== "openai" && provider !== "anthropic" && provider !== "grok")
     return null;
 
-  const records = listAccounts(KEYED_PROVIDER_ACCOUNT[provider])
-    .filter((record) => trimmed(record.credentials.access) !== null)
-    .sort((a, b) => b.updatedAt - a.updatedAt);
-  const pooled = records[0];
-  if (pooled) {
-    return { value: pooled.credentials.access.trim(), source: "account-pool" };
+  const accountProvider = KEYED_PROVIDER_ACCOUNT[provider];
+  const records = listAccounts(accountProvider);
+  if (pool && records.length > 0) {
+    const pooled = selectPooledCredential(
+      accountProvider,
+      records,
+      pool,
+      accountStrategy(config, accountProvider),
+    );
+    if (pooled) return { value: pooled, source: "account-pool" };
+    if (provider === "grok") return null;
   }
 
   let launchValue: string | null = null;
@@ -214,19 +297,25 @@ export function readProviderCredential(
 }
 
 /**
- * Whether a provider plugin package can be loaded in this process: a mobile
- * bundle can load only statically registered plugins; elsewhere the package
- * must be present in a `node_modules` directory on this module's resolution
- * path. Uses package directories rather than export maps, which differ
- * between ESM-only and dual packages.
+ * Whether a provider plugin package can be loaded in this process, from the
+ * same sources the plugin resolver loads from: the static registry (the only
+ * source in a mobile bundle), an install record in config (plugins installed
+ * into the state dir), or a `node_modules` directory on this module's
+ * resolution path. Uses package directories rather than export maps, which
+ * differ between ESM-only and dual packages.
  */
-export function isProviderPluginInstalled(pluginName: string): boolean {
+export function isProviderPluginInstalled(
+  pluginName: string,
+  config?: ElizaConfig,
+): boolean {
   if (
     STATIC_ELIZA_PLUGINS[pluginName] ||
     STATIC_ELIZA_PLUGIN_LOADERS[pluginName]
   )
     return true;
   if (isMobilePlatform()) return false;
+  const installPath = config?.plugins?.installs?.[pluginName]?.installPath;
+  if (typeof installPath === "string" && existsSync(installPath)) return true;
   const searchPaths =
     createRequire(import.meta.url).resolve.paths(pluginName) ?? [];
   return searchPaths.some((dir) =>
@@ -261,9 +350,11 @@ export interface ModelSettingsServiceDeps {
   saveConfig: (config: ElizaConfig) => void;
   env?: NodeJS.ProcessEnv;
   readCredential?: typeof readProviderCredential;
-  isPluginInstalled?: (pluginName: string) => boolean;
+  isPluginInstalled?: (pluginName: string, config: ElizaConfig) => boolean;
   fetchCatalog?: ModelCatalogFetcher;
   isCloudProvisioned?: () => boolean;
+  /** The host account pool; defaults to the agent host bridge's pool. */
+  accountPool?: () => AccountPoolSelector | null;
   now?: () => Date;
 }
 
@@ -443,12 +534,36 @@ export async function applyModelSelectionToConfig(
   applyDirectProviderModelEnv(config, env);
 }
 
+interface ActiveTierModel {
+  model: string | null;
+  source: ModelSettingsStatusDto["active"]["smallModelSource"];
+}
+
+/**
+ * One tier's effective model: the owner's pick, then the launch environment,
+ * then the provider's built-in default. A provider whose default id this host
+ * does not know reports `provider-default` with a null id.
+ */
+function activeTier(
+  picked: string | null,
+  fromEnv: string | null,
+  providerDefault: string | null,
+): ActiveTierModel {
+  if (picked) return { model: picked, source: "user" };
+  if (fromEnv) return { model: fromEnv, source: "environment" };
+  return { model: providerDefault, source: "provider-default" };
+}
+
 export class ModelSettingsService {
   private readonly env: NodeJS.ProcessEnv;
   private readonly readCredential: typeof readProviderCredential;
-  private readonly isPluginInstalled: (pluginName: string) => boolean;
+  private readonly isPluginInstalled: (
+    pluginName: string,
+    config: ElizaConfig,
+  ) => boolean;
   private readonly fetchCatalog: ModelCatalogFetcher;
   private readonly isCloudProvisioned: () => boolean;
+  private readonly accountPool: () => AccountPoolSelector | null;
   private readonly now: () => Date;
 
   constructor(private readonly deps: ModelSettingsServiceDeps) {
@@ -459,6 +574,10 @@ export class ModelSettingsService {
     this.fetchCatalog = deps.fetchCatalog ?? fetchProviderModelCatalog;
     this.isCloudProvisioned =
       deps.isCloudProvisioned ?? isCloudProvisionedContainer;
+    this.accountPool =
+      deps.accountPool ??
+      (() =>
+        getAgentHostBridge().getDefaultAccountPool() as AccountPoolSelector | null);
     this.now = deps.now ?? (() => new Date());
   }
 
@@ -470,6 +589,7 @@ export class ModelSettingsService {
       config: state.config,
       env: this.env,
       activeProvider: resolveActiveModelProvider(state.config),
+      pool: this.accountPool(),
     });
   }
 
@@ -504,7 +624,10 @@ export class ModelSettingsService {
     return {
       id: provider,
       label: PROVIDER_LABEL[provider],
-      pluginInstalled: this.isPluginInstalled(PROVIDER_PLUGIN[provider]),
+      pluginInstalled: this.isPluginInstalled(
+        providerPluginName(provider),
+        state.config,
+      ),
       credential,
       endpoint,
       supportsEndpoint: provider === "ollama" || provider === "openai",
@@ -520,51 +643,52 @@ export class ModelSettingsService {
     state: ModelSettingsState,
   ): Pick<
     ModelSettingsStatusDto["active"],
-    "smallModel" | "largeModel" | "modelSource"
+    "smallModel" | "largeModel" | "smallModelSource" | "largeModelSource"
   > {
+    const tiers = (
+      small: ActiveTierModel,
+      large: ActiveTierModel,
+    ): ReturnType<ModelSettingsService["activeModels"]> => ({
+      smallModel: small.model,
+      largeModel: large.model,
+      smallModelSource: small.source,
+      largeModelSource: large.source,
+    });
     if (provider === "elizacloud") {
       const llmText = state.config.serviceRouting?.llmText;
       const models = state.config.models as
         | { small?: unknown; large?: unknown }
         | undefined;
-      const userSmall = trimmed(llmText?.smallModel) ?? trimmed(models?.small);
-      const userLarge = trimmed(llmText?.largeModel) ?? trimmed(models?.large);
-      if (userSmall || userLarge) {
-        return {
-          smallModel: userSmall ?? DEFAULT_ELIZA_CLOUD_TEXT_MODEL,
-          largeModel: userLarge ?? DEFAULT_ELIZA_CLOUD_LARGE_TEXT_MODEL,
-          modelSource: "user",
-        };
-      }
-      const envSmall = trimmed(this.env.ELIZAOS_CLOUD_SMALL_MODEL);
-      const envLarge = trimmed(this.env.ELIZAOS_CLOUD_LARGE_MODEL);
-      if (envSmall || envLarge) {
-        return {
-          smallModel: envSmall ?? DEFAULT_ELIZA_CLOUD_TEXT_MODEL,
-          largeModel: envLarge ?? DEFAULT_ELIZA_CLOUD_LARGE_TEXT_MODEL,
-          modelSource: "environment",
-        };
-      }
-      return {
-        smallModel: DEFAULT_ELIZA_CLOUD_TEXT_MODEL,
-        largeModel: DEFAULT_ELIZA_CLOUD_LARGE_TEXT_MODEL,
-        modelSource: "provider-default",
-      };
+      return tiers(
+        activeTier(
+          trimmed(llmText?.smallModel) ?? trimmed(models?.small),
+          trimmed(this.env.ELIZAOS_CLOUD_SMALL_MODEL),
+          DEFAULT_ELIZA_CLOUD_TEXT_MODEL,
+        ),
+        activeTier(
+          trimmed(llmText?.largeModel) ?? trimmed(models?.large),
+          trimmed(this.env.ELIZAOS_CLOUD_LARGE_MODEL),
+          DEFAULT_ELIZA_CLOUD_LARGE_TEXT_MODEL,
+        ),
+      );
     }
     const direct = resolveDirectProviderModelEnv(state.config);
     if (!direct) {
-      return { smallModel: null, largeModel: null, modelSource: "unknown" };
+      const unknown: ActiveTierModel = { model: null, source: "unknown" };
+      return tiers(unknown, unknown);
     }
-    const smallModel =
-      direct.assignments[direct.smallKey] ?? trimmed(this.env[direct.smallKey]);
-    const largeModel =
-      direct.assignments[direct.largeKey] ?? trimmed(this.env[direct.largeKey]);
-    const modelSource = Object.keys(direct.assignments).length
-      ? "user"
-      : smallModel || largeModel
-        ? "environment"
-        : "provider-default";
-    return { smallModel, largeModel, modelSource };
+    // A provider without built-in model ids runs only the owner's picks; the
+    // shared OpenAI-compatible env keys may hold another provider's ids.
+    const requiresPicks = (
+      MODEL_REQUIRED_PROVIDER_IDS as readonly string[]
+    ).includes(direct.provider);
+    const tierFor = (key: string): ActiveTierModel => {
+      const picked = direct.assignments[key];
+      if (picked) return { model: picked, source: "user" };
+      if (requiresPicks) return { model: null, source: "unknown" };
+      return activeTier(null, trimmed(this.env[key]), null);
+    };
+    return tiers(tierFor(direct.smallKey), tierFor(direct.largeKey));
   }
 
   private async latestOperation(): Promise<ModelSettingsOperationDto | null> {
@@ -603,8 +727,7 @@ export class ModelSettingsService {
         providerLabel:
           provider === "other"
             ? (getFirstRunProviderOption(llmText?.backend)?.name ??
-              trimmed(llmText?.backend) ??
-              "Not configured")
+              trimmed(llmText?.backend))
             : PROVIDER_LABEL[provider],
         runtimeProviderName,
         ...this.activeModels(provider, state),
@@ -710,8 +833,8 @@ export class ModelSettingsService {
         context,
       );
     }
-    const pluginName = PROVIDER_PLUGIN[provider];
-    if (!this.isPluginInstalled(pluginName)) {
+    const pluginName = providerPluginName(provider);
+    if (!this.isPluginInstalled(pluginName, state.config)) {
       throw modelSettingsError(
         "PROVIDER_PLUGIN_MISSING",
         `${PROVIDER_LABEL[provider]} is unavailable because ${pluginName} is not installed.`,
@@ -737,7 +860,12 @@ export class ModelSettingsService {
 
     const selection = { provider, smallModel, largeModel };
     if (!this.deps.operations) {
-      await applyModelSelectionToConfig(state.config, selection, this.env);
+      // Persisted for the next boot: the loaded provider plugin keeps serving
+      // from this process's env until then, so the model projection goes to a
+      // scratch copy and only the saved config changes. Boot re-projects it.
+      await applyModelSelectionToConfig(state.config, selection, {
+        ...this.env,
+      });
       this.deps.saveConfig(state.config);
       logger.info(
         { provider, smallModel, largeModel },

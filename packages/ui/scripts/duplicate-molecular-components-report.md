@@ -1,6 +1,6 @@
 # Molecular component duplicate inventory
 
-Scanned 911 maintained React files. 103 exported compositions have a recognized molecular role and at least two atomic dependencies.
+Scanned 915 maintained React files. 104 exported compositions have a recognized molecular role and at least two atomic dependencies.
 
 Clusters share both a role and an atomic dependency signature. Detection creates a review queue; this committed report contains only final dispositions based on product behavior, state ownership, and responsive layout.
 
@@ -13,7 +13,7 @@ These owners are fail-closed contracts. The audit fails if an owner disappears, 
 | auth-result-shell | `AuthResultShell` in `packages/ui/src/cloud/public-pages/pages/auth/auth-result-shell.tsx` | 2 | `packages/ui/src/cloud/public-pages/pages/auth/auth-result-shell.stories.tsx`<br>`packages/ui/src/cloud/public-pages/pages/auth/auth-result-shell.test.tsx` | Full-page surface, centered card, and content geometry for authentication results. |
 | connection-capability-tile | `ConnectionCapabilityTile` in `packages/ui/src/cloud/connectors/connection-capability-tile.tsx` | 2 | `packages/ui/src/cloud/connectors/connection-capability-tile.stories.tsx`<br>`packages/ui/src/cloud/connectors/connection-capability-tile.test.tsx` | Icon, title, and description hierarchy for connector capability grids. |
 | content-state | `ContentState` in `packages/ui/src/components/composites/page-panel/content-state.tsx` | 5 | `packages/ui/src/components/composites/page-panel/content-state.stories.tsx`<br>`packages/ui/src/components/composites/page-panel/content-state.test.tsx` | Empty and loading presentation inside page-panel placements. |
-| settings-row | `SettingsRow` in `packages/ui/src/components/settings/settings-layout.tsx` | 42 | `packages/ui/src/components/settings/settings-layout.stories.tsx`<br>`packages/ui/src/components/settings/settings-layout.test.tsx` | Label, description, control, and navigation alignment for settings. |
+| settings-row | `SettingsRow` in `packages/ui/src/components/settings/settings-layout.tsx` | 43 | `packages/ui/src/components/settings/settings-layout.stories.tsx`<br>`packages/ui/src/components/settings/settings-layout.test.tsx` | Label, description, control, and navigation alignment for settings. |
 | action-list-row | `ActionListRow` in `packages/ui/src/components/shared/ActionListRow.tsx` | 2 | `packages/ui/src/components/shared/ActionListRow.stories.tsx`<br>`packages/ui/src/components/shared/ActionListRow.test.tsx` | Button, link, and static list rows with shared content slots. |
 
 ## Duplicate review queue

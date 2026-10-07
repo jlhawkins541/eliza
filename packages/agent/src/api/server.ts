@@ -360,18 +360,7 @@ import {
   getAgentHostBridge,
 } from "../runtime/host-bridge.ts";
 import {
-  resolvePreferredProviderId,
-  resolvePrimaryModel,
-} from "../runtime/model-resolution.ts";
-import {
-  type ClassifyContext,
-  createColdStrategy,
-  createHotStrategy,
-  createRuntimeOperationStrategies,
   DefaultRuntimeOperationManager,
-  defaultClassifier,
-  getDefaultHealthChecker,
-  getDefaultRepository,
   type RuntimeOperationManager,
 } from "../runtime/operations/index.ts";
 import { classifyRegistryPluginRelease } from "../runtime/release-plugin-policy.ts";
@@ -1411,6 +1400,7 @@ import { resolveHostSessionAccessContext } from "./host-session-access-context.t
 import { resolveHttpAccessContext } from "./http-access-context.ts";
 import { resolveInboxRequestAuthorization } from "./inbox-request-authorization.ts";
 import { registerModelSettingsHost } from "./model-settings-host.ts";
+import { buildRuntimeOperationManagerOptions } from "./runtime-operation-manager-options.ts";
 
 const isAllowedHost = _isAllowedHost;
 const applyCors = _applyCors;
@@ -1460,31 +1450,9 @@ function getOrCreateRuntimeOperationManager(
   if (cachedRuntimeOperationManager) {
     return cachedRuntimeOperationManager;
   }
-  const repository = getDefaultRepository();
-  const healthChecker = getDefaultHealthChecker();
-  const coldStrategy = createColdStrategy({
-    restartRuntime: async (reason) => {
-      const ok = await restartRuntime(reason);
-      if (!ok) return null;
-      return state.runtime;
-    },
-  });
-  const hotStrategy = createHotStrategy({});
-  const classifyContext = (): ClassifyContext => ({
-    currentProvider: resolvePreferredProviderId(state.config),
-    currentPrimaryModel: resolvePrimaryModel(state.config),
-  });
-  cachedRuntimeOperationManager = new DefaultRuntimeOperationManager({
-    repository,
-    runtime: () => state.runtime,
-    classifyContext,
-    classifier: defaultClassifier,
-    healthChecker,
-    strategies: createRuntimeOperationStrategies({
-      cold: coldStrategy,
-      hot: hotStrategy,
-    }),
-  });
+  cachedRuntimeOperationManager = new DefaultRuntimeOperationManager(
+    buildRuntimeOperationManagerOptions(state, restartRuntime),
+  );
   return cachedRuntimeOperationManager;
 }
 
@@ -1577,6 +1545,99 @@ function wireProactiveInteractionDecider(
     notify: (offer) => notifyProactiveInteraction(rt, offer),
     shouldSuppress: () => state.activeChatTurnCount > 0,
   });
+}
+
+/**
+ * The runtime restart the cold reload strategy, backup restore, and other
+ * routes run: swaps `state.runtime` for the host's replacement and keeps the
+ * agent state and status broadcast consistent. Returns false when the host
+ * has no restart hook, a restart is already running, or the replacement
+ * failed.
+ */
+function createRuntimeRestarter(
+  state: ServerState,
+  ctx: RequestContext | undefined,
+): (reason: string, options?: RuntimeRestartOptions) => Promise<boolean> {
+  return async (
+    reason: string,
+    options?: RuntimeRestartOptions,
+  ): Promise<boolean> => {
+    if (!ctx?.onRestart) {
+      return false;
+    }
+    if (state.agentState === "restarting") {
+      return false;
+    }
+
+    const previousState = state.agentState;
+    logger.info(`[eliza-api] Applying runtime reload: ${reason}`);
+    state.agentState = "restarting";
+    state.startup = { ...state.startup, phase: "restarting" };
+    state.broadcastStatus?.();
+
+    try {
+      const previousRuntime = state.runtime;
+      const newRuntime = await ctx.onRestart(options);
+      if (!newRuntime) {
+        state.agentState = options?.disposeCurrentBeforeBuild
+          ? "error"
+          : previousState;
+        if (options?.disposeCurrentBeforeBuild) {
+          state.startup = {
+            ...state.startup,
+            phase: "error",
+            lastError:
+              "Runtime replacement failed after the current runtime was disposed",
+            lastErrorAt: Date.now(),
+          };
+        }
+        state.broadcastStatus?.();
+        return false;
+      }
+
+      await quiesceRuntimeBeforeReplacement(previousRuntime, newRuntime);
+      state.runtime = newRuntime;
+      state.chatConnectionReady = null;
+      state.chatConnectionPromise = null;
+      state.agentState = "running";
+      state.agentName =
+        newRuntime.character.name ?? resolveDefaultAgentName(state.config);
+      state.model = detectRuntimeModel(newRuntime, state.config);
+      state.startedAt = Date.now();
+      state.pendingRestartReasons = [];
+      ctx.onRuntimeSwapped?.();
+      try {
+        await ctx.onRuntimeActivated?.(previousRuntime, newRuntime);
+      } catch (err) {
+        // error-policy:J6 the replacement is already active; host cleanup must
+        // be observable without reverting a healthy runtime.
+        newRuntime.reportError("api.restart.activateRuntime", err);
+        logger.warn(
+          `[eliza-api] Post-swap runtime cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      state.broadcastStatus?.();
+      return true;
+    } catch (err) {
+      logger.warn(
+        `[eliza-api] Runtime reload failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      state.agentState = options?.disposeCurrentBeforeBuild
+        ? "error"
+        : previousState;
+      if (options?.disposeCurrentBeforeBuild) {
+        state.startup = {
+          ...state.startup,
+          phase: "error",
+          lastError:
+            "Runtime replacement failed after the current runtime was disposed",
+          lastErrorAt: Date.now(),
+        };
+      }
+      state.broadcastStatus?.();
+      return false;
+    }
+  };
 }
 
 async function handleRequest(
@@ -1716,94 +1777,7 @@ async function handleRequest(
     });
   };
 
-  const restartRuntime = async (
-    reason: string,
-    options?: RuntimeRestartOptions,
-  ): Promise<boolean> => {
-    if (!ctx?.onRestart) {
-      return false;
-    }
-    if (state.agentState === "restarting") {
-      return false;
-    }
-
-    const previousState = state.agentState;
-    logger.info(`[eliza-api] Applying runtime reload: ${reason}`);
-    state.agentState = "restarting";
-    state.startup = { ...state.startup, phase: "restarting" };
-    state.broadcastStatus?.();
-
-    try {
-      const previousRuntime = state.runtime;
-      const newRuntime = await ctx.onRestart(options);
-      if (!newRuntime) {
-        state.agentState = options?.disposeCurrentBeforeBuild
-          ? "error"
-          : previousState;
-        if (options?.disposeCurrentBeforeBuild) {
-          state.startup = {
-            ...state.startup,
-            phase: "error",
-            lastError:
-              "Runtime replacement failed after the current runtime was disposed",
-            lastErrorAt: Date.now(),
-          };
-        }
-        state.broadcastStatus?.();
-        return false;
-      }
-
-      await quiesceRuntimeBeforeReplacement(previousRuntime, newRuntime);
-      state.runtime = newRuntime;
-      state.chatConnectionReady = null;
-      state.chatConnectionPromise = null;
-      state.agentState = "running";
-      state.agentName =
-        newRuntime.character.name ?? resolveDefaultAgentName(state.config);
-      state.model = detectRuntimeModel(newRuntime, state.config);
-      state.startedAt = Date.now();
-      state.pendingRestartReasons = [];
-      ctx.onRuntimeSwapped?.();
-      try {
-        await ctx.onRuntimeActivated?.(previousRuntime, newRuntime);
-      } catch (err) {
-        // error-policy:J6 the replacement is already active; host cleanup must
-        // be observable without reverting a healthy runtime.
-        newRuntime.reportError("api.restart.activateRuntime", err);
-        logger.warn(
-          `[eliza-api] Post-swap runtime cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      state.broadcastStatus?.();
-      return true;
-    } catch (err) {
-      logger.warn(
-        `[eliza-api] Runtime reload failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      state.agentState = options?.disposeCurrentBeforeBuild
-        ? "error"
-        : previousState;
-      if (options?.disposeCurrentBeforeBuild) {
-        state.startup = {
-          ...state.startup,
-          phase: "error",
-          lastError:
-            "Runtime replacement failed after the current runtime was disposed",
-          lastErrorAt: Date.now(),
-        };
-      }
-      state.broadcastStatus?.();
-      return false;
-    }
-  };
-
-  // The SETTINGS agent action activates models through the same operation
-  // manager this request path uses; re-register so it sees the live state.
-  registerModelSettingsHost(() => ({
-    state,
-    operations: getOrCreateRuntimeOperationManager(state, restartRuntime),
-    saveConfig: saveElizaConfig,
-  }));
+  const restartRuntime = createRuntimeRestarter(state, ctx);
 
   // ── DNS rebinding protection ──────────────────────────────────────────
   // Reject requests whose Host header doesn't match a known loopback
@@ -4046,27 +4020,36 @@ export async function startApiServer(opts?: {
     `[eliza-api] Creating http server (${Date.now() - apiStartTime}ms)`,
   );
   apiLap("pre-createServer (route imports + middleware setup done)");
+  const requestContext: RequestContext = {
+    onRestart,
+    onRuntimeActivated,
+    onRuntimeSwapped: () => {
+      bindInProcessApi();
+      bindRuntimeStreams(state.runtime);
+      wireModelRegistrationBroadcast(state.runtime);
+      void wireCoordinatorBridgesWhenReady(state, {
+        wireChatBridge: wireCodingAgentChatBridge,
+        wireWsBridge: wireCodingAgentWsBridge,
+        wireEventRouting: wireCoordinatorEventRouting,
+        wireSwarmSynthesis: wireCodingAgentSwarmSynthesis,
+        context: "restart",
+        logger,
+      });
+    },
+    getAppManager: ensureAppManager,
+  };
+  // The SETTINGS agent action activates models through the operation manager
+  // the HTTP routes use, including chat that arrives through a connector
+  // before any HTTP request has reached this host.
+  const hostRestartRuntime = createRuntimeRestarter(state, requestContext);
+  registerModelSettingsHost(() => ({
+    state,
+    operations: getOrCreateRuntimeOperationManager(state, hostRestartRuntime),
+    saveConfig: saveElizaConfig,
+  }));
   const routeKernel = createRouteKernel({
     dispatch: async (req, res) => {
-      const dispatch = () =>
-        handleRequest(req, res, state, {
-          onRestart,
-          onRuntimeActivated,
-          onRuntimeSwapped: () => {
-            bindInProcessApi();
-            bindRuntimeStreams(state.runtime);
-            wireModelRegistrationBroadcast(state.runtime);
-            void wireCoordinatorBridgesWhenReady(state, {
-              wireChatBridge: wireCodingAgentChatBridge,
-              wireWsBridge: wireCodingAgentWsBridge,
-              wireEventRouting: wireCoordinatorEventRouting,
-              wireSwarmSynthesis: wireCodingAgentSwarmSynthesis,
-              context: "restart",
-              logger,
-            });
-          },
-          getAppManager: ensureAppManager,
-        });
+      const dispatch = () => handleRequest(req, res, state, requestContext);
       if (opts?.requestMiddleware) {
         await opts.requestMiddleware(req, res, dispatch);
       } else {
@@ -5428,6 +5411,7 @@ export async function startApiServer(opts?: {
   }
   const stopServerSideResources = (): Promise<void> => {
     unregisterInProcessApi?.();
+    registerModelSettingsHost(null);
     return serverResources.close();
   };
   // Local-agent IPC mode: skip binding a TCP listener entirely. Routes and the

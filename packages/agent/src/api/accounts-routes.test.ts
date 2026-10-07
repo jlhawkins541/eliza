@@ -591,6 +591,31 @@ describe("accounts routes", () => {
     delete process.env.XAI_API_KEY;
   });
 
+  it("withholds the OpenAI-compatible alias for a direct Grok route without both models", async () => {
+    const created = makeContext("POST", "/api/accounts/xai-api", {
+      source: "api-key",
+      label: "Work",
+      apiKey: "xai-live-value",
+    });
+    created.ctx.state.config = {
+      serviceRouting: {
+        llmText: {
+          backend: "grok",
+          transport: "direct",
+          smallModel: "grok-4-fast",
+        },
+      },
+    } as unknown as AccountsRouteContext["state"]["config"];
+    await handleAccountsRoutes(created.ctx);
+    // No active backend: the pool exports XAI_API_KEY only, never the
+    // OPENAI_API_KEY + api.x.ai base URL pair that would send the OpenAI
+    // plugin's default model ids to xAI.
+    expect(fakes.applyAccountPoolApiCredentials).toHaveBeenCalledWith(
+      expect.objectContaining({ activeBackend: undefined }),
+    );
+    delete process.env.XAI_API_KEY;
+  });
+
   it.each([
     ["openrouter-api", "sk-or-test-value"],
     ["xai-api", "xai-test-value"],

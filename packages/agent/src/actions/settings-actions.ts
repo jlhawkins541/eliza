@@ -42,6 +42,7 @@ import {
   isActivatableModelProviderId,
   normalizeFirstRunProviderId,
   PostActivateModelRequestSchema,
+  providerRequiresModelSelection,
   resolveDevCloudEnvAuthority,
 } from "@elizaos/shared";
 import { getModelSettingsHost } from "../api/model-settings-host.ts";
@@ -217,9 +218,34 @@ async function handleUpdateAiProvider(
   const hasModelTiers =
     params.smallModel !== undefined || params.largeModel !== undefined;
 
-  // The Models-page providers switch through the same use-case the page
-  // calls. A key supplied in chat or legacy model-slot overrides keep the
-  // config-only path below.
+  // A provider with no built-in model ids (xAI Grok) is only runnable with
+  // both tiers chosen from its catalog, so it always takes the shared
+  // activation and its MODEL_REQUIRED check. Its key is owned by the account
+  // pool and legacy model slots do not reach its plugin, so neither input is
+  // accepted here.
+  if (
+    isActivatableModelProviderId(normalizedProvider) &&
+    providerRequiresModelSelection(normalizedProvider)
+  ) {
+    if (apiKey) {
+      return fail(
+        "API_KEY_NOT_ACCEPTED",
+        `Add the ${getFirstRunProviderOption(normalizedProvider)?.name ?? normalizedProvider} API key in Settings → Accounts; this action does not take keys.`,
+        { provider: normalizedProvider },
+      );
+    }
+    if (modelConfigs) {
+      return fail(
+        "MODEL_SELECTION_UNSUPPORTED",
+        "Choose smallModel and largeModel from the provider's catalog instead of modelConfigs.",
+        { provider: normalizedProvider },
+      );
+    }
+    return activateThroughModelSettings(normalizedProvider, params);
+  }
+
+  // The other Models-page providers switch through the same use-case when the
+  // request carries neither a key nor legacy model-slot overrides.
   if (
     isActivatableModelProviderId(normalizedProvider) &&
     !apiKey &&
