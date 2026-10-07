@@ -1,16 +1,18 @@
 /**
  * Defines `walletRouterAction`, the single `WALLET` action that dispatches
  * every wallet subaction (`transfer`, `swap`, `bridge`, `gov`, `pump_fun_buy`,
- * `token_info`, `search_address`, `token_safety`, `token_pairs`, `social_signal`) and absorbs the legacy per-verb similes
+ * `token_info`, `search_address`, `token_safety`, `onchain_token_safety`,
+ * `token_pairs`, `social_signal`) and absorbs the legacy per-verb similes
  * (`SWAP`, `TRANSFER`, `CROSS_CHAIN_TRANSFER`, `WALLET_GOV`, `PUMP_FUN_BUY`,
  * `TOKEN_INFO`, `BIRDEYE_SEARCH`, …) so older prompts keep working. It parses
  * and validates raw params via `parseWalletRouterParams`, routes financial
  * subactions through the `wallet-context-safety` recipient/injection guards
  * and the `wallet-financial-confirmation` gate before touching
- * `WalletBackendService`, and dispatches the five read-only analytics
- * subactions (`token_info`, `search_address`, `token_safety`, `token_pairs`,
- * `social_signal`) directly to
- * their handlers without the financial confirmation gate.
+ * `WalletBackendService`, and dispatches the six read-only analytics
+ * subactions (`token_info`, `search_address`, `token_safety`, a GoPlus
+ * rug-risk report, `onchain_token_safety`, a key-free on-chain Solana mint
+ * read, `token_pairs` and `social_signal`) directly to their handlers without
+ * the financial confirmation gate.
  */
 import type {
   Action,
@@ -28,6 +30,7 @@ import { tokenPairsHandler } from "../analytics/dexscreener/pairs-action.js";
 import { tokenSafetyHandler } from "../analytics/goplus/action.js";
 import { socialSignalHandler } from "../analytics/lunarcrush/action.js";
 import { tokenInfoHandler } from "../analytics/token-info/action.js";
+import { tokenSafetyHandler as onchainTokenSafetyHandler } from "../analytics/token-safety/action.js";
 import {
   assertEvmTransferRecipientAuthorized,
   assertSolanaTransferRecipientAuthorized,
@@ -79,6 +82,10 @@ const LEGACY_PUMP_FUN_ACTIONS = new Set([
   "BUY_PUMPFUN",
 ]);
 const LEGACY_TOKEN_INFO_ACTIONS = new Set(["TOKEN_INFO"]);
+// CHECK_TOKEN_SAFETY and TOKEN_SAFETY are deliberately absent: the registry
+// plugin-x402-finance registers CHECK_TOKEN_SAFETY with simile TOKEN_SAFETY
+// for its Base honeypot check, and claiming either here would take its calls.
+const LEGACY_ONCHAIN_TOKEN_SAFETY_ACTIONS = new Set(["TOKEN_SECURITY"]);
 const LEGACY_SEARCH_ADDRESS_ACTIONS = new Set([
   "BIRDEYE_SEARCH",
   "BIRDEYE_LOOKUP",
@@ -90,6 +97,7 @@ const ANALYTICS_SUBACTIONS = [
   "token_info",
   "search_address",
   "token_safety",
+  "onchain_token_safety",
   "token_pairs",
   "social_signal",
 ] as const;
@@ -164,6 +172,8 @@ function legacySubactionFromName(value: unknown): WalletSubaction | undefined {
   if (LEGACY_PUMP_FUN_ACTIONS.has(upper)) return "pump_fun_buy";
   if (LEGACY_TOKEN_INFO_ACTIONS.has(upper)) return "token_info";
   if (LEGACY_SEARCH_ADDRESS_ACTIONS.has(upper)) return "search_address";
+  if (LEGACY_ONCHAIN_TOKEN_SAFETY_ACTIONS.has(upper))
+    return "onchain_token_safety";
   return undefined;
 }
 
@@ -397,6 +407,41 @@ function serviceFromRuntime(
   return null;
 }
 
+type AnalyticsHandlerArgs = {
+  runtime: IAgentRuntime;
+  message: Memory;
+  state?: State;
+  options?: HandlerOptions | Record<string, unknown>;
+  raw: Record<string, unknown>;
+  callback?: HandlerCallback;
+};
+
+// Read-only analytics subactions dispatch here before runWalletRouter, so they
+// never reach WalletBackendService or the financial confirmation gate.
+const ANALYTICS_HANDLERS: Record<
+  WalletAnalyticsSubaction,
+  (args: AnalyticsHandlerArgs) => Promise<ActionResult>
+> = {
+  token_info: (a) =>
+    tokenInfoHandler(a.runtime, a.message, a.state, a.options, a.callback),
+  search_address: (a) =>
+    walletSearchAddressHandler(
+      a.runtime,
+      a.message,
+      a.state,
+      a.options,
+      a.callback,
+    ),
+  token_safety: (a) =>
+    tokenSafetyHandler(a.runtime, a.message, a.state, a.options, a.callback),
+  onchain_token_safety: (a) =>
+    onchainTokenSafetyHandler(a.runtime, a.raw, a.callback),
+  token_pairs: (a) =>
+    tokenPairsHandler(a.runtime, a.message, a.state, a.options, a.callback),
+  social_signal: (a) =>
+    socialSignalHandler(a.runtime, a.message, a.state, a.options, a.callback),
+};
+
 async function parseRouterParams(
   message: Memory,
   state?: State,
@@ -553,9 +598,9 @@ async function runWalletRouter(
 export const walletRouterAction: Action = {
   name: "WALLET",
   description:
-    "Route wallet operations through registered chain handlers and analytics providers. Use action=transfer|swap|bridge|gov|pump_fun_buy for on-chain ops (params: chain, toChain, fromToken, toToken, amount, recipient, slippageBps, mode, dryRun); action=token_info for token/market data (params: target, query, address, chain); action=search_address for Birdeye wallet/portfolio lookup (param: address); action=token_safety for a GoPlus rug-risk check of a Solana mint (param: address); action=token_pairs for DexScreener liquidity, 24h volume and pool age of a Solana mint (param: address), a signal that can only add caution; action=social_signal for a LunarCrush Galaxy Score, AltRank and sentiment lookup by ticker (param: symbol), a signal that can only add caution.",
+    "Route wallet operations through registered chain handlers and analytics providers. Use action=transfer|swap|bridge|gov|pump_fun_buy for on-chain ops (params: chain, toChain, fromToken, toToken, amount, recipient, slippageBps, mode, dryRun); action=token_info for token/market data (params: target, query, address, chain); action=search_address for Birdeye wallet/portfolio lookup (param: address); action=token_safety for a GoPlus rug-risk check of a Solana mint with a verdict (param: address); action=onchain_token_safety, an independent read-only on-chain Solana mint check from SOLANA_RPC_URL (no key, no signing): token program, supply/decimals, mint and freeze authority, every Token-2022 extension (TransferHook, TransferFeeConfig, PermanentDelegate, NonTransferable, DefaultAccountState, MintCloseAuthority, PausableConfig decoded; others listed by name) and the largest token accounts' share of supply (accounts, not owners); a check that could not run reads UNKNOWN, never passed (param: address = the mint); action=token_pairs for DexScreener liquidity, 24h volume and pool age of a Solana mint (param: address), a signal that can only add caution; action=social_signal for a LunarCrush Galaxy Score, AltRank and sentiment lookup by ticker (param: symbol), a signal that can only add caution.",
   descriptionCompressed:
-    "WALLET transfer|swap|bridge|gov|pump_fun_buy|token_info|search_address|token_safety|token_pairs|social_signal; chain ops + market/portfolio + token safety + liquidity + social signal",
+    "WALLET transfer|swap|bridge|gov|pump_fun_buy|token_info|search_address|token_safety|onchain_token_safety|token_pairs|social_signal; chain ops + market/portfolio + GoPlus token safety + on-chain Solana mint safety + liquidity + social signal",
   contexts: ["finance", "crypto", "wallet"],
   contextGate: { anyOf: ["finance", "crypto", "wallet"] },
   roleGate: { minRole: "ADMIN" },
@@ -593,6 +638,7 @@ export const walletRouterAction: Action = {
         "token_info",
         "search_address",
         "token_safety",
+        "onchain_token_safety",
         "token_pairs",
         "social_signal",
       ],
@@ -740,7 +786,7 @@ export const walletRouterAction: Action = {
     {
       name: "address",
       description:
-        "Wallet address for search_address; token contract address for token_info token lookups; Solana token mint for token_safety and token_pairs.",
+        "Wallet address for search_address; token contract address for token_info token lookups; Solana token mint for token_safety and token_pairs; Solana mint address (base58) for onchain_token_safety.",
       required: false,
       schema: { type: "string" },
     },
@@ -771,26 +817,15 @@ export const walletRouterAction: Action = {
     const raw = extractRawParams(message, state, options) ?? {};
     const subaction = resolveSubaction(raw);
 
-    if (subaction === "token_info") {
-      return tokenInfoHandler(runtime, message, state, options, callback);
-    }
-    if (subaction === "token_safety") {
-      return tokenSafetyHandler(runtime, message, state, options, callback);
-    }
-    if (subaction === "token_pairs") {
-      return tokenPairsHandler(runtime, message, state, options, callback);
-    }
-    if (subaction === "social_signal") {
-      return socialSignalHandler(runtime, message, state, options, callback);
-    }
-    if (subaction === "search_address") {
-      return walletSearchAddressHandler(
+    if (isWalletAnalyticsSubaction(subaction)) {
+      return ANALYTICS_HANDLERS[subaction]({
         runtime,
         message,
         state,
         options,
+        raw,
         callback,
-      );
+      });
     }
 
     return runWalletRouter(runtime, message, state, options, callback);
@@ -851,6 +886,21 @@ export const walletRouterAction: Action = {
         content: {
           text: "Fetching the Birdeye portfolio.",
           action: "WALLET",
+        },
+      },
+    ],
+    [
+      {
+        name: "{{user1}}",
+        content: {
+          text: "Check on-chain whether mint 2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo has a freeze authority or a TransferHook",
+        },
+      },
+      {
+        name: "{{agent}}",
+        content: {
+          text: "Reading the mint from Solana RPC.",
+          actions: ["WALLET"],
         },
       },
     ],

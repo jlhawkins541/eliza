@@ -3,6 +3,9 @@
  * and implements its dispatch (`searchBirdeyeTokens`): auto-detects symbol vs
  * contract-address queries, then fans out to Birdeye's search/overview/
  * market-data/security/trade-data endpoints and renders a compact result table.
+ * Address results also render a per-token security table into the
+ * model-facing text; a check Birdeye did not answer reads "unknown", never a
+ * pass, because downstream risk reasoning depends on that distinction.
  */
 import type { IAgentRuntime, SearchCategoryRegistration } from "@elizaos/core";
 import { BirdeyeProvider } from "./birdeye";
@@ -184,11 +187,30 @@ export interface BirdeyeTokenSearchRequest {
 type BirdeyeTokenAddressSearchResult = {
   address: BaseAddress;
   chain: string;
+  securityRequested: boolean;
   overview?: TokenOverviewResponse;
   marketData?: TokenMarketDataResponse;
   security?: TokenSecurityResponse;
   tradeData?: TokenTradeDataSingleResponse;
 };
+
+const SECURITY_FIELDS = [
+  "address",
+  "status",
+  "freezeable",
+  "freezeAuthority",
+  "mintable",
+  "mutableMetadata",
+  "top10HolderPercent",
+  "creatorPercent",
+  "ownerPercent",
+  "isToken2022",
+  "transferFeeEnable",
+  "nonTransferable",
+  "fakeToken",
+  "jupStrictList",
+  "honeypot",
+] as const;
 
 type BirdeyeTokenSymbolSearchResult = {
   symbol: string;
@@ -435,6 +457,7 @@ async function searchTokensByAddress(
       return {
         address,
         chain,
+        securityRequested: includeSecurity,
         overview,
         marketData,
         security,
@@ -483,6 +506,57 @@ function formatSymbolSearchJson(
     .join("\n");
 }
 
+// A missing security value is rendered as "unknown" rather than null or false
+// so the model never reads an absent check as a passed one.
+function securityValue(value: unknown): string | boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string" && value.length > 0) return value;
+  return "unknown";
+}
+
+function securityPercent(fraction: unknown): string {
+  return typeof fraction === "number" && Number.isFinite(fraction)
+    ? `${(fraction * 100).toFixed(2)}%`
+    : "unknown";
+}
+
+function securityFlagged(value: unknown): string | boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "object" && value !== null) return "flagged";
+  return "unknown";
+}
+
+function securityRow(
+  result: BirdeyeTokenAddressSearchResult,
+): Record<(typeof SECURITY_FIELDS)[number], unknown> {
+  const data = result.security?.data;
+  const status = !result.securityRequested
+    ? "not_requested"
+    : data && Object.keys(data).length > 0
+      ? "ok"
+      : "no_data";
+  const checks = data?.securityChecks;
+  const freezeAuthority =
+    data?.freezeable === false ? "none" : securityValue(data?.freezeAuthority);
+  return {
+    address: result.address.address,
+    status,
+    freezeable: securityValue(data?.freezeable),
+    freezeAuthority,
+    mintable: securityValue(data?.mintable ?? checks?.is_mintable),
+    mutableMetadata: securityValue(data?.mutableMetadata),
+    top10HolderPercent: securityPercent(data?.top10HolderPercent),
+    creatorPercent: securityPercent(data?.creatorPercentage),
+    ownerPercent: securityPercent(data?.ownerPercentage),
+    isToken2022: securityValue(data?.isToken2022),
+    transferFeeEnable: securityValue(data?.transferFeeEnable),
+    nonTransferable: securityValue(data?.nonTransferable),
+    fakeToken: securityFlagged(data?.fakeToken),
+    jupStrictList: securityValue(data?.jupStrictList),
+    honeypot: securityValue(checks?.is_honeypot ?? checks?.honeypot),
+  };
+}
+
 function formatAddressSearchJson(
   query: string,
   results: BirdeyeTokenAddressSearchResult[],
@@ -525,6 +599,10 @@ function formatAddressSearchJson(
       "change24h",
       "owner",
     ]),
+    formatJsonTable("  security", results.map(securityRow), [
+      ...SECURITY_FIELDS,
+    ]),
+    '  securityNote: "unknown means Birdeye returned no value for that check; treat it as unverified, not as passed."',
   ]
     .filter(Boolean)
     .join("\n");

@@ -72,6 +72,24 @@ export interface TokenSecurityResponse {
     proxy?: string;
     ownerAddress?: string;
     creatorAddress?: string;
+    /** Solana: whether the mint still has a freeze authority. */
+    freezeable?: boolean | null;
+    /** Solana: the freeze authority address, null when revoked. */
+    freezeAuthority?: string | null;
+    /** Solana: whether Metaplex metadata can still be changed. */
+    mutableMetadata?: boolean | null;
+    /** Solana: share of supply held by the top 10 holders, as a 0–1 fraction. */
+    top10HolderPercent?: number | null;
+    /** Solana: share of supply held by the creator, as a 0–1 fraction. */
+    creatorPercentage?: number | null;
+    /** Solana: share of supply held by the owner, as a 0–1 fraction. */
+    ownerPercentage?: number | null;
+    isToken2022?: boolean | null;
+    transferFeeEnable?: boolean | null;
+    nonTransferable?: boolean | null;
+    /** Solana: set when Birdeye flags the mint as impersonating another token. */
+    fakeToken?: unknown;
+    jupStrictList?: boolean | null;
     securityChecks?: {
       honeypot?: boolean;
       trading_cooldown?: boolean;
