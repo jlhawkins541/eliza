@@ -44,6 +44,18 @@ Access via the `lpManagerPlugin` export; LP actions are surfaced as the `LIQUIDI
 - **Token info:** multi-provider dispatcher (DexScreener, Birdeye, CoinGecko).
 - **DeFi news:** via `defiNewsPlugin`.
 
+## Crypto terminal real trades
+
+The terminal's Real trade tab places Solana swaps signed either by Phantom in
+the browser or by the agent's own wallet. Each trade is quoted by Jupiter,
+simulated, and shown for review first. With Phantom, confirming opens
+Phantom's approval popup; the server sends the transaction only if Phantom
+signed the reviewed bytes unchanged and the signature is from the reviewed
+address. Phantom trades work in the default sign-only trade permission and need
+Phantom installed in the browser that opens the terminal (the desktop app's own
+window has no extension, so it offers the agent wallet). Agent requests can't
+review or send either kind.
+
 ## Terminal MCP server
 
 `bun run --cwd plugins/plugin-wallet mcp` serves the crypto terminal's research

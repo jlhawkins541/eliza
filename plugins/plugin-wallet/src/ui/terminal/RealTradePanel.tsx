@@ -1,9 +1,11 @@
 /**
  * The crypto terminal's Real trade tab: a Solana buy / sell ticket that spends
- * real funds from the agent's wallet through the `/api/wallet/terminal/trade/*`
- * routes. Every trade is reviewed first, where the server builds and simulates
- * the exact transaction, and is sent only when the person taps Confirm inside
- * the review window. The review shows what the architecture notes require
+ * real funds through the `/api/wallet/terminal/trade/*` routes, signed either
+ * by Phantom in this browser or by the agent's own wallet. Every trade is
+ * reviewed first, where the server builds and simulates the exact transaction,
+ * and is sent only when the person taps Confirm inside the review window. A
+ * Phantom trade then also needs the person's approval in Phantom's popup, and
+ * the server sends it only if Phantom signed the reviewed bytes unchanged. The review shows what the architecture notes require
  * before signing: chain, mint, amounts, minimum output, slippage, destination,
  * fee budget, route, simulation, how it is sent (the Solana RPC, or privately
  * through Jito with a tip), the token safety verdict, and the LunarCrush
@@ -13,9 +15,10 @@
  * orders (`ExchangeOrderPanel.tsx`), reviewed by the exchange and placed only
  * on the same kind of confirm tap.
  *
- * Turning real trading on changes the agent's trade permission to
- * `manual-local-key`, which lets a person trade from the local wallet but never
- * lets the agent trade on its own. The panel shares nothing with paper trading.
+ * Phantom trades work in the default sign-only permission. Agent wallet trades
+ * need real trading turned on, which changes the agent's trade permission to
+ * `manual-local-key`: a person may trade from the local wallet, and the agent
+ * still can't trade on its own. The panel shares nothing with paper trading.
  */
 import {
   Button,
@@ -38,9 +41,15 @@ import type {
   WalletTerminalTradeReview,
   WalletTerminalTradeSendRoute,
   WalletTerminalTradeSide,
+  WalletTerminalTradeSigner,
   WalletTerminalTradeStatusResponse,
   WalletTokenSafetyVerdict,
 } from "../../contracts.ts";
+import {
+  type BrowserWalletHandle,
+  findPhantom,
+  usePhantomWallet,
+} from "./browser-wallet.ts";
 import { ExchangeOrderPanel } from "./ExchangeOrderPanel.tsx";
 import { LiquidityRow } from "./LiquidityRow.tsx";
 import { SocialSignalRow } from "./SocialSignalRow.tsx";
@@ -69,6 +78,16 @@ const SEND_ROUTE_ITEMS: Array<{
   { value: "rpc", label: "Your RPC" },
   { value: "jito", label: "Jito (private)" },
 ];
+
+type SignerChoice = "phantom" | "agent";
+
+const SIGNER_ITEMS: Array<{ value: SignerChoice; label: string }> = [
+  { value: "phantom", label: "Phantom" },
+  { value: "agent", label: "Agent wallet" },
+];
+
+/** What the confirm button is waiting on after the tap. */
+type SendPhase = "idle" | "wallet" | "sending";
 
 const SAFETY_COPY: Record<WalletTokenSafetyVerdict, string> = {
   avoid: "Avoid: GoPlus found a power that can take, lock, or block tokens.",
@@ -219,7 +238,7 @@ function ReviewDialog({
   safety: TokenSafetyState | null;
   social: SocialSignalState;
   pairs: TokenPairsState;
-  sending: boolean;
+  sending: SendPhase;
   result: WalletTerminalTradeExecuteResponse | null;
   error: string | null;
   onConfirm: () => void;
@@ -230,6 +249,7 @@ function ReviewDialog({
   const expired = !result && secondsLeft === 0;
   const output = tokenLabel(review.output);
   const fee = review.fee;
+  const inPhantom = review.signing.kind === "browser-wallet";
 
   return (
     <Dialog open onOpenChange={(open) => (open ? undefined : onClose())}>
@@ -239,8 +259,13 @@ function ReviewDialog({
             {result ? "Trade sent" : "Review real trade"}
           </DialogTitle>
           <DialogDescription>
-            {review.side === "buy" ? "Buy" : "Sell"} on Solana with your wallet.
-            {result ? "" : " Nothing moves until you confirm."}
+            {review.side === "buy" ? "Buy" : "Sell"} on Solana with{" "}
+            {inPhantom ? "Phantom" : "the agent wallet"}.
+            {result
+              ? ""
+              : inPhantom
+                ? " Nothing moves until you confirm here and approve in Phantom."
+                : " Nothing moves until you confirm."}
           </DialogDescription>
         </DialogHeader>
         {result ? (
@@ -264,6 +289,9 @@ function ReviewDialog({
               <Row label="Slippage">{review.slippageBps / 100}%</Row>
               <Row label="Price impact">
                 {formatImpact(review.priceImpactPct)}
+              </Row>
+              <Row label="Signed by" testId="real-trade-signer">
+                {inPhantom ? "Phantom" : "Agent wallet"}
               </Row>
               <Row label="Goes to">{review.walletAddress}</Row>
               <Row label="Network fee" testId="real-trade-fee">
@@ -364,10 +392,16 @@ function ReviewDialog({
           ) : (
             <Button
               onClick={onConfirm}
-              disabled={sending || !review.canConfirm}
+              disabled={sending !== "idle" || !review.canConfirm}
               data-testid="real-trade-confirm"
             >
-              {sending ? "Sending…" : "Confirm trade"}
+              {sending === "wallet"
+                ? "Approve in Phantom…"
+                : sending === "sending"
+                  ? "Sending…"
+                  : inPhantom
+                    ? "Confirm and sign in Phantom"
+                    : "Confirm trade"}
             </Button>
           )}
         </DialogFooter>
@@ -445,10 +479,14 @@ function TradeTicket({
   trading,
   status,
   initialMint,
+  signer,
+  browserWallet,
 }: {
   trading: RealTradingHandle;
   status: WalletTerminalTradeStatusResponse;
   initialMint: string | null;
+  signer: WalletTerminalTradeSigner;
+  browserWallet: BrowserWalletHandle | null;
 }) {
   const [side, setSide] = useState<WalletTerminalTradeSide>("buy");
   const [mint, setMint] = useState(initialMint ?? "");
@@ -463,7 +501,7 @@ function TradeTicket({
   const [reviewing, setReviewing] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [review, setReview] = useState<WalletTerminalTradeReview | null>(null);
-  const [sending, setSending] = useState(false);
+  const [sending, setSending] = useState<SendPhase>("idle");
   const [sendError, setSendError] = useState<string | null>(null);
   const [result, setResult] =
     useState<WalletTerminalTradeExecuteResponse | null>(null);
@@ -497,6 +535,7 @@ function TradeTicket({
       amount: amount.trim(),
       slippageBps,
       sendRoute,
+      signer,
     };
     void trading.review(request).then((outcome) => {
       setReviewing(false);
@@ -515,8 +554,35 @@ function TradeTicket({
     });
   };
 
+  const confirm = async (current: WalletTerminalTradeReview) => {
+    setSendError(null);
+    let signedTransaction: string | undefined;
+    if (current.signing.kind === "browser-wallet") {
+      if (!browserWallet) {
+        setSendError("Connect Phantom to sign this trade.");
+        return;
+      }
+      setSending("wallet");
+      const signed = await browserWallet.sign(
+        current.signing.unsignedTransaction,
+        current.walletAddress,
+      );
+      if (!signed.ok) {
+        setSending("idle");
+        setSendError(signed.message);
+        return;
+      }
+      signedTransaction = signed.signedTransaction;
+    }
+    setSending("sending");
+    const outcome = await trading.execute(current.reviewId, signedTransaction);
+    setSending("idle");
+    if (outcome.ok) setResult(outcome.value);
+    else setSendError(outcome.message);
+  };
+
   const close = () => {
-    if (sending) return;
+    if (sending !== "idle") return;
     setReview(null);
     setResult(null);
     setSendError(null);
@@ -627,16 +693,127 @@ function TradeTicket({
           onClose={close}
           onReviewAgain={startReview}
           onConfirm={() => {
-            setSending(true);
-            setSendError(null);
-            void trading.execute(review.reviewId).then((outcome) => {
-              setSending(false);
-              if (outcome.ok) setResult(outcome.value);
-              else setSendError(outcome.message);
-            });
+            void confirm(review);
           }}
         />
       ) : null}
+    </>
+  );
+}
+
+function PhantomSection({
+  trading,
+  status,
+  wallet,
+  initialMint,
+}: {
+  trading: RealTradingHandle;
+  status: WalletTerminalTradeStatusResponse;
+  wallet: BrowserWalletHandle;
+  initialMint: string | null;
+}) {
+  const { state } = wallet;
+  if (!status.browserWalletEnabled) {
+    return (
+      <p role="alert" className="text-sm text-warn">
+        Trading is disabled for this agent, including Phantom trades.
+      </p>
+    );
+  }
+  if (state.status === "missing") {
+    return (
+      <p className="text-sm text-muted" data-testid="phantom-missing">
+        Phantom isn't installed in this browser. Install it from phantom.com and
+        reload, or sign with the agent wallet.
+      </p>
+    );
+  }
+  if (state.status !== "connected") {
+    return (
+      <section
+        className="flex flex-col gap-2 rounded-md border border-border/70 p-4"
+        data-testid="phantom-disconnected"
+      >
+        <p className="text-xs text-muted">
+          Connect Phantom to trade from it. The terminal only reads its address;
+          each trade is reviewed here and signed in Phantom's own popup.
+        </p>
+        <Button
+          className="self-start"
+          disabled={state.status === "connecting"}
+          onClick={wallet.connect}
+          data-testid="phantom-connect"
+        >
+          {state.status === "connecting" ? "Connecting…" : "Connect Phantom"}
+        </Button>
+        {state.status === "disconnected" && state.error ? (
+          <p role="alert" className="text-xs text-danger">
+            {state.error}
+          </p>
+        ) : null}
+      </section>
+    );
+  }
+  return (
+    <>
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs text-muted" data-testid="phantom-account">
+          Phantom {shortAddress(state.address)}
+        </p>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={wallet.disconnect}
+          data-testid="phantom-disconnect"
+        >
+          Disconnect
+        </Button>
+      </div>
+      <TradeTicket
+        key={state.address}
+        trading={trading}
+        status={status}
+        initialMint={initialMint}
+        signer={{ kind: "browser-wallet", address: state.address }}
+        browserWallet={wallet}
+      />
+    </>
+  );
+}
+
+function AgentWalletSection({
+  trading,
+  status,
+  initialMint,
+}: {
+  trading: RealTradingHandle;
+  status: WalletTerminalTradeStatusResponse;
+  initialMint: string | null;
+}) {
+  return (
+    <>
+      <p className="text-xs text-muted" data-testid="real-trade-wallet">
+        Wallet{" "}
+        {status.wallet.address
+          ? shortAddress(status.wallet.address)
+          : "not set up"}{" "}
+        · Trade permission: {MODE_COPY[status.tradePermissionMode]}
+      </p>
+      {!status.wallet.canSign ? (
+        <p role="alert" className="text-sm text-warn">
+          This wallet can't place trades: {status.wallet.reason}
+        </p>
+      ) : !status.realTradingEnabled ? (
+        <EnableRealTrading trading={trading} />
+      ) : (
+        <TradeTicket
+          trading={trading}
+          status={status}
+          initialMint={initialMint}
+          signer={{ kind: "agent-wallet" }}
+          browserWallet={null}
+        />
+      )}
     </>
   );
 }
@@ -648,6 +825,11 @@ export function RealTradePanel({
 }) {
   const trading = useRealTrading();
   const { state } = trading;
+  const phantom = usePhantomWallet();
+  // Phantom first when this browser has it; otherwise the agent wallet.
+  const [signerChoice, setSignerChoice] = useState<SignerChoice>(() =>
+    findPhantom() ? "phantom" : "agent",
+  );
 
   return (
     <div className="flex flex-col gap-4">
@@ -677,21 +859,24 @@ export function RealTradePanel({
         </div>
       ) : (
         <>
-          <p className="text-xs text-muted" data-testid="real-trade-wallet">
-            Wallet{" "}
-            {state.data.wallet.address
-              ? shortAddress(state.data.wallet.address)
-              : "not set up"}{" "}
-            · Trade permission: {MODE_COPY[state.data.tradePermissionMode]}
-          </p>
-          {!state.data.wallet.canSign ? (
-            <p role="alert" className="text-sm text-warn">
-              This wallet can't place trades: {state.data.wallet.reason}
-            </p>
-          ) : !state.data.realTradingEnabled ? (
-            <EnableRealTrading trading={trading} />
+          <div className="flex flex-col gap-1">
+            <span className="text-xs text-muted">Sign trades with</span>
+            <SegmentedControl
+              value={signerChoice}
+              onValueChange={(value) => setSignerChoice(value as SignerChoice)}
+              items={SIGNER_ITEMS}
+              aria-label="Sign trades with"
+            />
+          </div>
+          {signerChoice === "phantom" ? (
+            <PhantomSection
+              trading={trading}
+              status={state.data}
+              wallet={phantom}
+              initialMint={initialMint}
+            />
           ) : (
-            <TradeTicket
+            <AgentWalletSection
               trading={trading}
               status={state.data}
               initialMint={initialMint}

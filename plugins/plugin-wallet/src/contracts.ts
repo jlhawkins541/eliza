@@ -398,6 +398,15 @@ export type WalletTerminalTradeSide = "buy" | "sell";
  */
 export type WalletTerminalTradeSendRoute = "rpc" | "jito";
 
+/**
+ * Who signs a terminal trade: the agent's own wallet backend, or a browser
+ * wallet such as Phantom that the person approves in its own popup. A browser
+ * wallet trade names the public key the swap is built for.
+ */
+export type WalletTerminalTradeSigner =
+  | { kind: "agent-wallet" }
+  | { kind: "browser-wallet"; address: string };
+
 /** Whether this wallet can sign Solana trades for the terminal. */
 export type WalletTerminalTradeWallet =
   | { canSign: true; address: string }
@@ -408,6 +417,12 @@ export interface WalletTerminalTradeStatusResponse {
   tradePermissionMode: TradePermissionMode;
   /** True when the permission mode lets a person trade with the local wallet. */
   realTradingEnabled: boolean;
+  /**
+   * True when a person may trade by signing in a browser wallet. Allowed in
+   * every permission mode except `disabled`, because the wallet's own approval
+   * popup is the signature; agent requests are still refused.
+   */
+  browserWalletEnabled: boolean;
   wallet: WalletTerminalTradeWallet;
   /** Largest buy allowed in one trade, in SOL. */
   maxBuySol: number;
@@ -426,6 +441,7 @@ export interface WalletTerminalTradeReviewRequest {
   amount: string;
   slippageBps: number;
   sendRoute: WalletTerminalTradeSendRoute;
+  signer: WalletTerminalTradeSigner;
 }
 
 /** One side of a reviewed swap, in display units and base units. */
@@ -488,12 +504,22 @@ export interface WalletTerminalTradeReview {
   simulation: WalletTerminalTradeSimulation;
   /** False when the simulation failed; such a review cannot be confirmed. */
   canConfirm: boolean;
+  /**
+   * How confirm signs. A browser wallet review carries the exact unsigned
+   * transaction (base64) for the wallet to sign; execute accepts it back only
+   * if its message is byte-for-byte this one.
+   */
+  signing:
+    | { kind: "agent-wallet" }
+    | { kind: "browser-wallet"; unsignedTransaction: string };
 }
 
 /** Body of POST /api/wallet/terminal/trade/execute. */
 export interface WalletTerminalTradeExecuteRequest {
   reviewId: string;
   confirm: true;
+  /** Base64 transaction the browser wallet signed; only for browser wallet reviews. */
+  signedTransaction?: string;
 }
 
 /**
