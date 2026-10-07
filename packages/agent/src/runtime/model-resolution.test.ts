@@ -108,4 +108,18 @@ describe("resolvePreferredProviderPluginName", () => {
       resolvePreferredProviderPluginName({ serviceRouting: {} }),
     ).toBeUndefined();
   });
+
+  it("maps a direct Grok route to the installed OpenAI-compatible plugin", () => {
+    for (const backend of ["grok", "xai"]) {
+      const config: ElizaConfig = {
+        serviceRouting: {
+          llmText: { transport: "direct", backend },
+        },
+      };
+      expect(resolvePreferredProviderId(config)).toBe("grok");
+      expect(resolvePreferredProviderPluginName(config)).toBe(
+        "@elizaos/plugin-openai",
+      );
+    }
+  });
 });

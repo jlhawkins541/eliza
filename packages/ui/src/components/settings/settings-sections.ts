@@ -75,8 +75,10 @@ const IdentitySettingsSection = lazy(() =>
     default: m.IdentitySettingsSection,
   })),
 );
-const ProviderSwitcher = lazy(() =>
-  import("./ProviderSwitcher").then((m) => ({ default: m.ProviderSwitcher })),
+const ModelsSettingsSection = lazy(() =>
+  import("./models/ModelsWorkspace").then((m) => ({
+    default: m.ModelsSettingsSection,
+  })),
 );
 const VoiceSectionMount = lazy(() =>
   import("./VoiceSectionMount").then((m) => ({ default: m.VoiceSectionMount })),
@@ -329,7 +331,7 @@ const BUILTIN_SECTION_DEFINITIONS: readonly BuiltinSectionDefinition[] = [
     hue: "accent",
     labelKey: "settings.sections.aimodel.label",
     hideOnManagedCloud: true,
-    Component: ProviderSwitcher,
+    Component: ModelsSettingsSection,
   },
   {
     id: "voice",

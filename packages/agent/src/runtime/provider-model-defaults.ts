@@ -5,8 +5,15 @@
  *
  * Seeding order matters: every default here is set-if-missing, so explicit
  * operator config (env or character settings folded into env) always wins.
+ * The one deliberate override is `applyDirectProviderModelEnv`: models the
+ * owner picked for a direct provider in `serviceRouting.llmText` are mapped to
+ * that provider plugin's env keys and replace earlier values.
  */
-import { DEFAULT_CEREBRAS_TEXT_MODEL } from "@elizaos/shared";
+import {
+  DEFAULT_CEREBRAS_TEXT_MODEL,
+  normalizeFirstRunProviderId,
+  resolveServiceRoutingInConfig,
+} from "@elizaos/shared";
 
 /** Set an env default without clobbering an operator-provided value. */
 export function setEnvIfMissing(key: string, value: string | undefined): void {
@@ -104,4 +111,75 @@ export function applyProviderModelEnvDefaults(): void {
     "CEREBRAS_MODEL",
     process.env.CEREBRAS_SMALL_MODEL ?? cerebrasSmallModel,
   );
+}
+
+/**
+ * Env keys through which each direct provider plugin reads its small and
+ * large model ids. Grok runs through plugin-openai (the account pool exports
+ * the xAI key as an OpenAI-compatible credential), so it shares OpenAI's keys.
+ */
+export const DIRECT_PROVIDER_MODEL_ENV_KEYS: Readonly<
+  Record<string, { small: string; large: string }>
+> = {
+  openai: { small: "OPENAI_SMALL_MODEL", large: "OPENAI_LARGE_MODEL" },
+  grok: { small: "OPENAI_SMALL_MODEL", large: "OPENAI_LARGE_MODEL" },
+  anthropic: { small: "ANTHROPIC_SMALL_MODEL", large: "ANTHROPIC_LARGE_MODEL" },
+  ollama: { small: "OLLAMA_SMALL_MODEL", large: "OLLAMA_LARGE_MODEL" },
+};
+
+export interface DirectProviderModelEnv {
+  provider: string;
+  smallKey: string;
+  largeKey: string;
+  /** Assignments derived from the route; a tier the owner did not pick is absent. */
+  assignments: Record<string, string>;
+}
+
+function trimmedOrUndefined(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Pure: derive the model env assignments for the direct text route in
+ * `config`. Returns null when text is not routed directly to a provider in
+ * {@link DIRECT_PROVIDER_MODEL_ENV_KEYS}; cloud model env stays owned by the
+ * cloud projection.
+ */
+export function resolveDirectProviderModelEnv(config: {
+  serviceRouting?: unknown;
+}): DirectProviderModelEnv | null {
+  const llmText = resolveServiceRoutingInConfig(
+    config as Record<string, unknown>,
+  )?.llmText;
+  if (llmText?.transport !== "direct") return null;
+  const provider = normalizeFirstRunProviderId(llmText.backend);
+  if (!provider) return null;
+  const keys = DIRECT_PROVIDER_MODEL_ENV_KEYS[provider];
+  if (!keys) return null;
+  const assignments: Record<string, string> = {};
+  const small = trimmedOrUndefined(llmText.smallModel);
+  const large = trimmedOrUndefined(llmText.largeModel);
+  if (small) assignments[keys.small] = small;
+  if (large) assignments[keys.large] = large;
+  return { provider, smallKey: keys.small, largeKey: keys.large, assignments };
+}
+
+/**
+ * Write the owner's direct-provider model selection into `env`. Boot calls it
+ * for `process.env` and for the in-memory `config.env` that feeds runtime
+ * settings (which plugins read before `process.env`); activation calls it
+ * after persisting a new selection.
+ */
+export function applyDirectProviderModelEnv(
+  config: { serviceRouting?: unknown },
+  env: Record<string, unknown>,
+): DirectProviderModelEnv | null {
+  const resolved = resolveDirectProviderModelEnv(config);
+  if (!resolved) return null;
+  for (const [key, value] of Object.entries(resolved.assignments)) {
+    env[key] = value;
+  }
+  return resolved;
 }

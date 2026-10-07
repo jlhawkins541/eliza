@@ -390,6 +390,18 @@ const ROUTES: DevRouteEntry[] = [
     platformGate: null,
   },
   {
+    // Owner-only model provider page; Settings → Models & Providers renders
+    // the same workspace.
+    tabId: "models",
+    path: "/models",
+    label: "Models",
+    group: "Settings",
+    visibility: "all",
+    featureFlag: null,
+    requiresAuth: true,
+    platformGate: null,
+  },
+  {
     // Owner-only vault workspace — reachable directly at /vault; not
     // in any ALL_TAB_GROUPS launcher group, like rolodex/desktop/background.
     tabId: "vault",

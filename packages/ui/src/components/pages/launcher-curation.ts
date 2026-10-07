@@ -44,6 +44,7 @@ export const LAUNCHER_APPS_ORDER: readonly string[] = [
   // LAUNCHER_HIDDEN_IDS instead (#14479). The home chat + default landing are
   // untouched.
   "settings",
+  "models",
   "wallet",
   "tasks",
   "calendar",

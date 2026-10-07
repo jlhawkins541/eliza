@@ -522,6 +522,22 @@ export async function handlePermissionsExtraRoutes(
   ).handlePermissionsExtraRoutes(...args);
 }
 
+type ModelSettingsRoutesModule = typeof import("./model-settings-routes.ts");
+export async function handleModelSettingsRoutes(
+  ...args: Parameters<ModelSettingsRoutesModule["handleModelSettingsRoutes"]>
+): ReturnType<ModelSettingsRoutesModule["handleModelSettingsRoutes"]> {
+  const ctx = routeContext(args);
+  if (
+    ctx?.pathname !== "/api/model-settings" &&
+    !ctx?.pathname.startsWith("/api/model-settings/")
+  ) {
+    return false;
+  }
+  return (await import("./model-settings-routes.ts")).handleModelSettingsRoutes(
+    ...args,
+  );
+}
+
 type ProviderSwitchRoutesModule = typeof import("./provider-switch-routes.ts");
 export async function handleProviderSwitchRoutes(
   ...args: Parameters<ProviderSwitchRoutesModule["handleProviderSwitchRoutes"]>

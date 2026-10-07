@@ -124,6 +124,28 @@ describe("classifyOperation", () => {
       ).toBe("hot");
     });
 
+    it("returns cold for a same-provider model-tier selection", () => {
+      // The hot strategy re-applies the connection config and never updates
+      // plugin runtime settings, so a model-tier change would not take effect
+      // until the next boot; the restart is the tier that applies it.
+      expect(
+        classifyOperation(
+          switchTo("openai", {
+            modelSelection: { smallModel: "gpt-5.6-luna", largeModel: null },
+          }),
+          { currentProvider: "openai" },
+        ),
+      ).toBe("cold");
+      expect(
+        classifyOperation(
+          switchTo("ollama", {
+            modelSelection: { smallModel: null, largeModel: null },
+          }),
+          { currentProvider: "ollama" },
+        ),
+      ).toBe("cold");
+    });
+
     it("returns warm when switching between providers in the openai family", () => {
       expect(
         classifyOperation(switchTo("openai-subscription"), {

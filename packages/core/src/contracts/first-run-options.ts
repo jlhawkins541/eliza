@@ -444,7 +444,10 @@ export const FIRST_RUN_PROVIDER_CATALOG = [
 		id: "grok",
 		name: "xAI (Grok)",
 		envKey: "XAI_API_KEY",
-		pluginName: "@elizaos/plugin-xai",
+		// xAI serves an OpenAI-compatible API. The account pool exports the xAI
+		// key as OPENAI_API_KEY with OPENAI_BASE_URL=https://api.x.ai/v1 while
+		// Grok is the active backend, so the OpenAI plugin is the model handler.
+		pluginName: "@elizaos/plugin-openai",
 		keyPrefix: "xai-",
 		description: "xAI's Grok models.",
 		family: "grok",

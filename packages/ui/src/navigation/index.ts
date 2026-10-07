@@ -318,7 +318,7 @@ export const ALL_TAB_GROUPS: TabGroup[] = [
   },
   {
     label: "Settings",
-    tabs: ["settings"],
+    tabs: ["settings", "models"],
     icon: Settings,
     description: "Configuration and preferences",
   },
@@ -623,6 +623,8 @@ export function titleForTab(tab: Tab): string {
       return "Databases";
     case "settings":
       return "Settings";
+    case "models":
+      return "Models";
     case "vault":
       return "Vault";
     case "logs":

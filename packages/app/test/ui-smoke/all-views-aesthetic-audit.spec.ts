@@ -72,6 +72,7 @@ const FRAMED_PAGE_SLUGS = new Set([
   "builtin-database",
   "builtin-experience",
   "builtin-memories",
+  "builtin-models",
   "builtin-tasks",
   "builtin-vault",
   "plugin-relationships-gui",

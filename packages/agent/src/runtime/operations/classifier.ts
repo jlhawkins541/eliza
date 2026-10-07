@@ -10,6 +10,10 @@
  *   1. restart                                 → cold (explicit user intent)
  *   2. plugin-enable / plugin-disable          → cold (loaded plugin set changes)
  *   3. provider-switch:
+ *        0. carries a modelSelection           → cold (model tiers are
+ *                                                projected into provider env
+ *                                                at boot; the hot path does
+ *                                                not reach plugin settings)
  *        a. same provider, key only            → hot
  *        b. same provider, primaryModel only   → hot
  *        c. same provider, both                → hot (still same plugin family)
@@ -43,6 +47,10 @@ function classifyProviderSwitch(
   intent: Extract<OperationIntent, { kind: "provider-switch" }>,
   ctx: ClassifyContext,
 ): ReloadTier {
+  if (intent.modelSelection) {
+    return "cold";
+  }
+
   const target = intent.provider;
   const current = ctx.currentProvider;
 

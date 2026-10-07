@@ -36,6 +36,8 @@ export * from "./inbox.js";
 export * from "./inbox-routes.js";
 export * from "./memory-routes.js";
 export * from "./misc-routes.js";
+export * from "./model-endpoint.js";
+export * from "./model-settings.js";
 export * from "./native-personal-data.js";
 export * from "./page-scope.js";
 export * from "./pendant-session-sync.js";

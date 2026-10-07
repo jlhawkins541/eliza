@@ -1,6 +1,7 @@
 /**
  * Behavioral coverage for provider-model-defaults: set-if-missing env writes,
- * OpenAI-only model-id detection, and applyProviderModelEnvDefaults seeding.
+ * OpenAI-only model-id detection, applyProviderModelEnvDefaults seeding, and
+ * the direct-provider model selection mapping.
  * Drives the real module — empty env, a single override, operator-vs-default
  * ties, Google key alias order, Groq/Cerebras shared-tier copy, and GPT-OSS
  * comparator edges — with no mocks of the seeders.
@@ -8,8 +9,10 @@
 import { DEFAULT_CEREBRAS_TEXT_MODEL } from "@elizaos/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  applyDirectProviderModelEnv,
   applyProviderModelEnvDefaults,
   isLikelyOpenAiTextModel,
+  resolveDirectProviderModelEnv,
   setEnvIfMissing,
 } from "./provider-model-defaults.ts";
 
@@ -320,5 +323,83 @@ describe("applyProviderModelEnvDefaults", () => {
     expect(isLikelyOpenAiTextModel("openai/gpt-oss-120b")).toBe(false);
     expect(process.env.GROQ_SMALL_MODEL).toBe("openai/gpt-oss-120b");
     expect(process.env.CEREBRAS_SMALL_MODEL).toBe("openai/gpt-oss-120b");
+  });
+});
+
+describe("applyDirectProviderModelEnv", () => {
+  const route = (
+    backend: string,
+    models: { smallModel?: string; largeModel?: string } = {},
+    transport: "direct" | "cloud-proxy" = "direct",
+  ) => ({
+    serviceRouting: { llmText: { backend, transport, ...models } },
+  });
+
+  it.each([
+    ["openai", "OPENAI_SMALL_MODEL", "OPENAI_LARGE_MODEL"],
+    ["grok", "OPENAI_SMALL_MODEL", "OPENAI_LARGE_MODEL"],
+    ["xai", "OPENAI_SMALL_MODEL", "OPENAI_LARGE_MODEL"],
+    ["anthropic", "ANTHROPIC_SMALL_MODEL", "ANTHROPIC_LARGE_MODEL"],
+    ["ollama", "OLLAMA_SMALL_MODEL", "OLLAMA_LARGE_MODEL"],
+  ])("maps the %s selection to %s / %s", (backend, smallKey, largeKey) => {
+    const env: Record<string, unknown> = {};
+    const applied = applyDirectProviderModelEnv(
+      route(backend, { smallModel: "pick-small", largeModel: "pick-large" }),
+      env,
+    );
+    expect(applied?.smallKey).toBe(smallKey);
+    expect(applied?.largeKey).toBe(largeKey);
+    expect(env).toEqual({ [smallKey]: "pick-small", [largeKey]: "pick-large" });
+  });
+
+  it("replaces a stale value left by a previous provider on the same keys", () => {
+    const env: Record<string, unknown> = {
+      OPENAI_SMALL_MODEL: "gpt-5.6-luna",
+      OPENAI_LARGE_MODEL: "gpt-5.6-sol",
+    };
+    applyDirectProviderModelEnv(
+      route("grok", { smallModel: "grok-4-fast", largeModel: "grok-4" }),
+      env,
+    );
+    expect(env.OPENAI_SMALL_MODEL).toBe("grok-4-fast");
+    expect(env.OPENAI_LARGE_MODEL).toBe("grok-4");
+  });
+
+  it("writes only the tiers the owner picked", () => {
+    const env: Record<string, unknown> = { ANTHROPIC_SMALL_MODEL: "keep" };
+    applyDirectProviderModelEnv(
+      route("anthropic", { largeModel: "claude-opus-4-8" }),
+      env,
+    );
+    expect(env).toEqual({
+      ANTHROPIC_SMALL_MODEL: "keep",
+      ANTHROPIC_LARGE_MODEL: "claude-opus-4-8",
+    });
+  });
+
+  it("leaves env untouched for cloud routes and unmapped providers", () => {
+    const env: Record<string, unknown> = {};
+    expect(
+      applyDirectProviderModelEnv(
+        route("elizacloud", { smallModel: "a" }, "cloud-proxy"),
+        env,
+      ),
+    ).toBeNull();
+    expect(
+      applyDirectProviderModelEnv(route("groq", { smallModel: "a" }), env),
+    ).toBeNull();
+    expect(applyDirectProviderModelEnv({}, env)).toBeNull();
+    expect(env).toEqual({});
+  });
+
+  it("resolves without side effects", () => {
+    const config = route("ollama", { smallModel: "llama3.2:3b" });
+    expect(resolveDirectProviderModelEnv(config)).toEqual({
+      provider: "ollama",
+      smallKey: "OLLAMA_SMALL_MODEL",
+      largeKey: "OLLAMA_LARGE_MODEL",
+      assignments: { OLLAMA_SMALL_MODEL: "llama3.2:3b" },
+    });
+    expect(process.env.OLLAMA_SMALL_MODEL).toBeUndefined();
   });
 });

@@ -367,6 +367,7 @@ import {
   type ClassifyContext,
   createColdStrategy,
   createHotStrategy,
+  createRuntimeOperationStrategies,
   DefaultRuntimeOperationManager,
   defaultClassifier,
   getDefaultHealthChecker,
@@ -492,6 +493,7 @@ import {
   handleMiscRoutes,
   handleMobileOptionalRoutes,
   handleModelConfigRoutes,
+  handleModelSettingsRoutes,
   handleModelsRoutes,
   handlePermissionRoutes,
   handlePermissionsExtraRoutes,
@@ -1408,6 +1410,7 @@ export { isWaifuChatAuthorized } from "./waifu-chat-role-resolver.ts";
 import { resolveHostSessionAccessContext } from "./host-session-access-context.ts";
 import { resolveHttpAccessContext } from "./http-access-context.ts";
 import { resolveInboxRequestAuthorization } from "./inbox-request-authorization.ts";
+import { registerModelSettingsHost } from "./model-settings-host.ts";
 
 const isAllowedHost = _isAllowedHost;
 const applyCors = _applyCors;
@@ -1477,7 +1480,10 @@ function getOrCreateRuntimeOperationManager(
     classifyContext,
     classifier: defaultClassifier,
     healthChecker,
-    strategies: { cold: coldStrategy, hot: hotStrategy },
+    strategies: createRuntimeOperationStrategies({
+      cold: coldStrategy,
+      hot: hotStrategy,
+    }),
   });
   return cachedRuntimeOperationManager;
 }
@@ -1790,6 +1796,14 @@ async function handleRequest(
       return false;
     }
   };
+
+  // The SETTINGS agent action activates models through the same operation
+  // manager this request path uses; re-register so it sees the live state.
+  registerModelSettingsHost(() => ({
+    state,
+    operations: getOrCreateRuntimeOperationManager(state, restartRuntime),
+    saveConfig: saveElizaConfig,
+  }));
 
   // ── DNS rebinding protection ──────────────────────────────────────────
   // Reject requests whose Host header doesn't match a known loopback
@@ -2194,6 +2208,36 @@ async function handleRequest(
     process.env.OPENAI_API_KEY = cloudApiKey;
     // Gemini CLI and Aider — no proxy support via ElizaCloud inference
   };
+
+  if (
+    pathname === "/api/model-settings" ||
+    pathname.startsWith("/api/model-settings/")
+  ) {
+    const modelSettingsCallerAuthorization = resolveInboxRequestAuthorization(
+      req,
+      method,
+      pathname,
+      await resolveHostSessionAuthorization(),
+    );
+    if (
+      await handleModelSettingsRoutes({
+        req,
+        res,
+        method,
+        pathname,
+        state,
+        json,
+        readJsonBody,
+        callerAuthorization: modelSettingsCallerAuthorization,
+        serviceDeps: () => ({
+          operations: getOrCreateRuntimeOperationManager(state, restartRuntime),
+          saveConfig: saveElizaConfig,
+        }),
+      })
+    ) {
+      return;
+    }
+  }
 
   if (method === "POST" && pathname === "/api/provider/switch") {
     if (

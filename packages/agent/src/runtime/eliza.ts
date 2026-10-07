@@ -72,8 +72,10 @@ import {
   installProcessSignalHandlers,
 } from "./process-lifecycle.ts";
 import {
+  applyDirectProviderModelEnv,
   applyProviderModelEnvDefaults,
   isLikelyOpenAiTextModel,
+  resolveDirectProviderModelEnv,
   setEnvIfMissing,
 } from "./provider-model-defaults.ts";
 import { hydrateSelectedProviderCredentialFromVault } from "./provider-vault-credential.ts";
@@ -4540,6 +4542,14 @@ export async function startEliza(
   // embedding warmup: that path is skipped on mobile and can run after the
   // text provider is already initialized.
   applyProviderModelEnvDefaults();
+  // The owner's direct-provider model choice replaces the defaults above.
+  // Plugins read runtime settings (built from config.env) before process.env,
+  // so the selection is applied to both sinks.
+  applyDirectProviderModelEnv(config, process.env);
+  if (resolveDirectProviderModelEnv(config)) {
+    config.env ??= {};
+    applyDirectProviderModelEnv(config, config.env as Record<string, unknown>);
+  }
 
   // 5-pre. Per-agent EVM + Solana wallet bootstrap is DEFERRED off the boot
   // critical path: it runs after the runtime is reachable (fired fire-and-forget

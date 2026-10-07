@@ -1933,6 +1933,140 @@ export async function installDefaultAppRoutes(page: Page): Promise<void> {
     });
   });
 
+  // Models page (owner-only `/api/model-settings`). The keyless smoke stack
+  // has no provider routing, so serve a representative DTO (OpenAI active
+  // with a stored key, Anthropic missing a key, a LAN Ollama) that satisfies
+  // the shared wire schema the client validates against.
+  const smokeUnchecked = { state: "unchecked", checkedAt: null, detail: null };
+  const smokeOpenAiEndpoint = {
+    url: "https://api.openai.com/v1",
+    isDefault: true,
+    transport: "https",
+    overriddenBy: null,
+  };
+  await page.route("**/api/model-settings", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        active: {
+          provider: "openai",
+          providerLabel: "OpenAI",
+          runtimeProviderName: "openai",
+          smallModel: "gpt-5.6-luna",
+          largeModel: "gpt-5.6-sol",
+          modelSource: "environment",
+          endpoint: smokeOpenAiEndpoint,
+          health: smokeUnchecked,
+        },
+        providers: [
+          {
+            id: "openai",
+            label: "OpenAI",
+            pluginInstalled: true,
+            credential: {
+              state: "stored",
+              last4: "smk1",
+              source: "account-pool",
+              lastVerifiedAt: null,
+              health: smokeUnchecked,
+            },
+            endpoint: smokeOpenAiEndpoint,
+            supportsEndpoint: true,
+            activatable: true,
+            requiresModelSelection: false,
+          },
+          {
+            id: "anthropic",
+            label: "Anthropic",
+            pluginInstalled: true,
+            credential: { state: "missing" },
+            endpoint: null,
+            supportsEndpoint: false,
+            activatable: true,
+            requiresModelSelection: false,
+          },
+          {
+            id: "grok",
+            label: "xAI Grok",
+            pluginInstalled: true,
+            credential: { state: "missing" },
+            endpoint: null,
+            supportsEndpoint: false,
+            activatable: true,
+            requiresModelSelection: true,
+          },
+          {
+            id: "ollama",
+            label: "Ollama",
+            pluginInstalled: true,
+            credential: { state: "not-required" },
+            endpoint: {
+              url: "http://192.168.1.50:11434",
+              isDefault: false,
+              transport: "http-private",
+              overriddenBy: null,
+            },
+            supportsEndpoint: true,
+            activatable: true,
+            requiresModelSelection: false,
+          },
+          {
+            id: "elizacloud",
+            label: "Eliza Cloud",
+            pluginInstalled: true,
+            credential: { state: "missing" },
+            endpoint: null,
+            supportsEndpoint: false,
+            activatable: true,
+            requiresModelSelection: false,
+          },
+          {
+            id: "local",
+            label: "On-device",
+            pluginInstalled: true,
+            credential: { state: "not-required" },
+            endpoint: null,
+            supportsEndpoint: false,
+            activatable: false,
+            requiresModelSelection: false,
+          },
+        ],
+        operation: null,
+        managedByCloud: false,
+      }),
+    });
+  });
+  await page.route(
+    "**/api/model-settings/providers/*/models",
+    async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.fallback();
+        return;
+      }
+      const provider =
+        /\/providers\/([^/]+)\/models/.exec(route.request().url())?.[1] ??
+        "openai";
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          provider,
+          state: "ok",
+          models: [
+            { id: "gpt-5.6-luna", label: "GPT-5.6 Luna" },
+            { id: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
+          ],
+          fetchedAt: SMOKE_GENERATED_AT,
+        }),
+      });
+    },
+  );
+
   // Slash-command catalog (chat composer) + custom-actions list — both are
   // shell-level GETs on the chat/home surface. The booted zero-key smoke stack
   // returns 501 (Not Implemented) for them, which the diagnostics guard treats
@@ -3597,26 +3731,29 @@ export async function installDefaultAppRoutes(page: Page): Promise<void> {
   // smoke server has no native inference or secrets backends, so expose their
   // real healthy-empty envelopes instead of leaking its generic 501 response
   // into otherwise unrelated route and interaction coverage.
-  await page.route("**/api/local-inference/voice-models/preferences", async (route) => {
-    const method = route.request().method();
-    if (method !== "GET" && method !== "POST") {
-      await route.fallback();
-      return;
-    }
-    const preferences = {
-      autoUpdateOnWifi: true,
-      autoUpdateOnCellular: false,
-      autoUpdateOnMetered: false,
-      quietHours: [{ start: "22:00", end: "08:00" }],
-    };
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(
-        method === "GET" ? { preferences } : { ok: true, preferences },
-      ),
-    });
-  });
+  await page.route(
+    "**/api/local-inference/voice-models/preferences",
+    async (route) => {
+      const method = route.request().method();
+      if (method !== "GET" && method !== "POST") {
+        await route.fallback();
+        return;
+      }
+      const preferences = {
+        autoUpdateOnWifi: true,
+        autoUpdateOnCellular: false,
+        autoUpdateOnMetered: false,
+        quietHours: [{ start: "22:00", end: "08:00" }],
+      };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(
+          method === "GET" ? { preferences } : { ok: true, preferences },
+        ),
+      });
+    },
+  );
 
   await page.route("**/api/local-inference/voice-models", async (route) => {
     if (route.request().method() !== "GET") {

@@ -5,7 +5,10 @@
  *
  * Ops:
  *   - get/list           → section registry from @elizaos/plugin-app-control
- *   - update_ai_provider → applyFirstRunConnectionConfig + saveElizaConfig
+ *   - update_ai_provider → for the Models-page providers (OpenAI, Anthropic,
+ *                          xAI Grok, Ollama, Eliza Cloud) the shared
+ *                          ModelSettingsService activation; otherwise
+ *                          applyFirstRunConnectionConfig + saveElizaConfig
  *   - toggle_capability  → config.ui.capabilities.{wallet|browser|computerUse}
  *   - set_owner_name     → config.ui.ownerName via owner-name service
  *   - set                → worldSettings registry write (key/value list)
@@ -17,6 +20,7 @@
 import {
   type Action,
   type ActionResult,
+  ElizaError,
   findWorldsForOwner,
   getSalt,
   type HandlerOptions,
@@ -35,9 +39,16 @@ import {
 } from "@elizaos/plugin-app-control";
 import {
   getFirstRunProviderOption,
+  isActivatableModelProviderId,
   normalizeFirstRunProviderId,
+  PostActivateModelRequestSchema,
   resolveDevCloudEnvAuthority,
 } from "@elizaos/shared";
+import { getModelSettingsHost } from "../api/model-settings-host.ts";
+import {
+  MODEL_SETTINGS_ERROR_STATUS,
+  ModelSettingsService,
+} from "../api/model-settings-service.ts";
 import {
   applyFirstRunConnectionConfig,
   createProviderSwitchConnection,
@@ -203,6 +214,26 @@ async function handleUpdateAiProvider(
   const modelConfigs = isRecord(params.modelConfigs)
     ? params.modelConfigs
     : null;
+  const hasModelTiers =
+    params.smallModel !== undefined || params.largeModel !== undefined;
+
+  // The Models-page providers switch through the same use-case the page
+  // calls. A key supplied in chat or legacy model-slot overrides keep the
+  // config-only path below.
+  if (
+    isActivatableModelProviderId(normalizedProvider) &&
+    !apiKey &&
+    !modelConfigs
+  ) {
+    return activateThroughModelSettings(normalizedProvider, params);
+  }
+  if (hasModelTiers) {
+    return fail(
+      "MODEL_SELECTION_UNSUPPORTED",
+      "smallModel/largeModel apply only to OpenAI, Anthropic, xAI Grok, Ollama, and Eliza Cloud, without an apiKey or modelConfigs.",
+      { provider: normalizedProvider },
+    );
+  }
   const primaryModel = trimToString(
     modelConfigs?.primary ?? modelConfigs?.large,
     MODEL_SLOT_MAX_LENGTH,
@@ -266,6 +297,94 @@ async function handleUpdateAiProvider(
       requiresRestart: true,
     },
   );
+}
+
+/**
+ * Chat twin of `POST /api/model-settings/activate`: validates with the same
+ * schema and runs the same activation. With an API host it starts the
+ * restart operation; a headless runtime persists the change for next boot.
+ */
+async function activateThroughModelSettings(
+  provider: string,
+  params: Record<string, unknown>,
+): Promise<ActionResult> {
+  const parsed = PostActivateModelRequestSchema.safeParse({
+    provider,
+    ...(params.smallModel !== undefined
+      ? { smallModel: params.smallModel }
+      : {}),
+    ...(params.largeModel !== undefined
+      ? { largeModel: params.largeModel }
+      : {}),
+  });
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const modelRequired =
+      (issue as { params?: { reason?: unknown } } | undefined)?.params
+        ?.reason === "MODEL_REQUIRED";
+    return fail(
+      modelRequired ? "MODEL_REQUIRED" : "INVALID_MODEL_SELECTION",
+      issue?.message ?? "Invalid model selection.",
+      { provider },
+    );
+  }
+  const request = parsed.data;
+  const host = getModelSettingsHost();
+  const service = new ModelSettingsService({
+    operations: host?.operations ?? null,
+    saveConfig: host?.saveConfig ?? saveElizaConfig,
+  });
+  const state = host?.state ?? { config: loadElizaConfig(), runtime: null };
+  const providerName =
+    getFirstRunProviderOption(request.provider)?.name ?? request.provider;
+  const models = {
+    smallModel: request.smallModel ?? null,
+    largeModel: request.largeModel ?? null,
+  };
+  try {
+    const outcome = await service.activate(request, state);
+    if (outcome.kind === "persisted") {
+      return ok(
+        `Switched AI provider to ${providerName}. Restart the agent to load the new provider.`,
+        {
+          op: "update_ai_provider",
+          provider: request.provider,
+          providerName,
+          ...models,
+          requiresRestart: true,
+        },
+      );
+    }
+    return ok(
+      `Switching AI provider to ${providerName}. The agent restarts to load it.`,
+      {
+        op: "update_ai_provider",
+        provider: request.provider,
+        providerName,
+        ...models,
+        operationId: outcome.operationId,
+        requiresRestart: false,
+      },
+    );
+  } catch (err) {
+    // error-policy:J1 the action boundary returns a structured failure to the
+    // planner; expected activation codes keep their code for the reply.
+    if (
+      err instanceof ElizaError &&
+      MODEL_SETTINGS_ERROR_STATUS[err.code] !== undefined
+    ) {
+      return fail(err.code, err.message, { provider: request.provider });
+    }
+    logger.error(
+      { error: err instanceof Error ? err.stack : String(err) },
+      "[SETTINGS] update_ai_provider activation failed",
+    );
+    return fail(
+      "SETTINGS_UPDATE_AI_PROVIDER_FAILED",
+      `Failed to switch provider: ${err instanceof Error ? err.message : String(err)}`,
+      { provider: request.provider },
+    );
+  }
 }
 
 // ── op: toggle_capability ────────────────────────────────────────────────
@@ -660,7 +779,7 @@ function handleSetBackend(
     // Immediate effect: the runtime's useModel override reads this via getSetting.
     runtime.setSetting?.("ELIZA_BRAIN_PROVIDER", provider);
     return ok(
-      `Chat brain provider set to \`${provider}\`. It takes effect on the next message (it falls back to the default if that provider has no loaded handler).`,
+      `Chat brain provider set to \`${provider}\`. It takes effect on the next message.`,
       { op: "set_backend", axis: "brain", provider },
     );
   }
@@ -846,6 +965,20 @@ export const settingsAction: Action = {
         "[update_ai_provider] Optional model slot overrides — `nano|small|medium|large|mega` or `primary`.",
       required: false,
       schema: { type: "object" as const },
+    },
+    {
+      name: "smallModel",
+      description:
+        "[update_ai_provider] Small model id from the provider's catalog (OpenAI, Anthropic, xAI Grok, Ollama). Required with largeModel for grok.",
+      required: false,
+      schema: { type: "string" as const },
+    },
+    {
+      name: "largeModel",
+      description:
+        "[update_ai_provider] Large model id from the provider's catalog (OpenAI, Anthropic, xAI Grok, Ollama). Required with smallModel for grok.",
+      required: false,
+      schema: { type: "string" as const },
     },
     {
       name: "capability",

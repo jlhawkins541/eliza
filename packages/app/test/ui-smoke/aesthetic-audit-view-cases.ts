@@ -33,6 +33,7 @@ export const BUILTIN_TAB_PATHS: Record<string, string> = {
   database: "/apps/database",
   desktop: "/desktop",
   settings: "/settings",
+  models: "/models",
   vault: "/vault",
   logs: "/apps/logs",
   background: "/background",

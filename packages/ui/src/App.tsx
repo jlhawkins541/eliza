@@ -54,6 +54,7 @@ import {
   LazyLiveMeetingPageView,
   LazyLogsView,
   LazyMemoryViewerView,
+  LazyModelsPageView,
   LazyPendantTranscriptView,
   LazyPluginsPageView,
   LazyRuntimeView,
@@ -1617,6 +1618,7 @@ function buildStaticTabRenderers(): Record<
         />
       </AppWorkspaceContent>
     ),
+    models: wrapOverlayAware(<LazyModelsPageView />),
     vault: wrapOverlayAware(<LazyVaultPageView />),
     // Camera is an AOSP-ElizaOS-fork-only surface — gate the route on the same
     // marker as the home tile, so a deep-link off the fork falls back to

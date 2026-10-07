@@ -7,12 +7,20 @@ import type {
   AllPermissionsState,
   FirstRunConnectorConfig as ConnectorConfig,
   FirstRunOptions,
+  ModelProviderId,
+  ModelSettingsStatusDto,
   PermissionId,
   PermissionState,
+  PostActivateModelRequest,
+  PostActivateModelResponse,
+  ProviderModelCatalogDto,
   SubscriptionStatusResponse,
 } from "@elizaos/shared";
 import {
   isElizaSettingsDebugEnabled,
+  ModelSettingsStatusSchema,
+  PostActivateModelResponseSchema,
+  ProviderModelCatalogSchema,
   sanitizeForSettingsDebug,
   settingsDebugCloudSummary,
 } from "@elizaos/shared";
@@ -409,6 +417,16 @@ declare module "./client-base" {
       apiKey?: string,
       primaryModel?: string,
     ): Promise<{ success: boolean; provider: string; restarting: boolean }>;
+    /** Owner-only Models page status (`GET /api/model-settings`). */
+    getModelSettings(): Promise<ModelSettingsStatusDto>;
+    /** Live chat-model catalog for one Models-page provider. */
+    listProviderModels(
+      provider: ModelProviderId,
+    ): Promise<ProviderModelCatalogDto>;
+    /** Switch provider/model tiers; the agent restarts to apply it. */
+    activateModel(
+      request: PostActivateModelRequest,
+    ): Promise<PostActivateModelResponse>;
     startOpenAILogin(): Promise<{
       authUrl: string;
       state: string;
@@ -1619,6 +1637,38 @@ ElizaClient.prototype.switchProvider = async function (
     result,
   });
   return result;
+};
+
+// Model settings responses are validated once here, at the transport
+// boundary, so the Models page renders only well-formed DTOs.
+ElizaClient.prototype.getModelSettings = async function (this: ElizaClient) {
+  return ModelSettingsStatusSchema.parse(
+    await this.fetch<unknown>("/api/model-settings"),
+  );
+};
+
+ElizaClient.prototype.listProviderModels = async function (
+  this: ElizaClient,
+  provider,
+) {
+  return ProviderModelCatalogSchema.parse(
+    await this.fetch<unknown>(
+      `/api/model-settings/providers/${encodeURIComponent(provider)}/models`,
+    ),
+  );
+};
+
+ElizaClient.prototype.activateModel = async function (
+  this: ElizaClient,
+  request,
+) {
+  return PostActivateModelResponseSchema.parse(
+    await this.fetch<unknown>("/api/model-settings/activate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    }),
+  );
 };
 
 ElizaClient.prototype.startOpenAILogin = async function (this: ElizaClient) {
