@@ -1,0 +1,9 @@
+# Publishes only on the host's loopback, so the terminal stays local-only.
+services:
+  terminal:
+    build: .
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      JUPITER_API_KEY: ${JUPITER_API_KEY:-}
+    restart: unless-stopped
