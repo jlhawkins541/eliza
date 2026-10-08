@@ -6,10 +6,14 @@
  * submits them. Nothing is re-quoted in between, so the transaction a person
  * reviewed is the one that is sent.
  *
- * This path is the terminal's own confirmation gate: both steps need a trade
- * permission mode that lets a person use the local wallet, and both refuse
- * requests marked as agent automation, so a terminal trade always rests on a
- * person's tap. A review is single-use, expires with its quote, and cannot be
+ * A trade is signed by one of two wallets, chosen per review. The agent
+ * wallet signs on the server and needs a trade permission mode that lets a
+ * person use the local wallet. A browser wallet such as Phantom signs in the
+ * person's browser: review returns the unsigned bytes, the wallet's own popup
+ * signs them, and execute accepts the result only when its message is
+ * byte-for-byte the reviewed one and the signature verifies for the reviewed
+ * address. Both steps refuse requests marked as agent automation, so a
+ * terminal trade always rests on a person's tap. A review is single-use, expires with its quote, and cannot be
  * executed when its simulation failed. Each buy is capped by
  * `WALLET_TERMINAL_MAX_BUY_SOL`.
  *
@@ -26,6 +30,7 @@ import { ElizaError, type IAgentRuntime, isElizaError } from "@elizaos/core";
 import type { TradePermissionMode } from "@elizaos/shared";
 import { PublicKey, VersionedTransaction } from "@solana/web3.js";
 import bs58 from "bs58";
+import nacl from "tweetnacl";
 import {
   fetchJupiterSwapTransaction,
   getSolanaConnection,
@@ -41,6 +46,7 @@ import type {
   WalletTerminalTradeReview,
   WalletTerminalTradeSendRoute,
   WalletTerminalTradeSide,
+  WalletTerminalTradeSigner,
   WalletTerminalTradeStatusResponse,
   WalletTerminalTradeWallet,
 } from "../contracts.js";
@@ -105,6 +111,7 @@ interface PendingTerminalTrade {
   readonly side: WalletTerminalTradeSide;
   readonly mint: string;
   readonly sending: WalletTerminalTradeReview["sending"];
+  readonly signer: WalletTerminalTradeSigner["kind"];
   used: boolean;
 }
 
@@ -151,12 +158,29 @@ function requireRuntime(runtime: IAgentRuntime | null): IAgentRuntime {
   return runtime;
 }
 
-function assertPermitted(access: TerminalTradeAccess): void {
+function browserWalletAllowed(mode: TradePermissionMode): boolean {
+  return mode !== "disabled";
+}
+
+function assertPermitted(
+  access: TerminalTradeAccess,
+  signer: WalletTerminalTradeSigner["kind"],
+): void {
   if (access.fromAgent) {
     throw tradeError(
       "TERMINAL_TRADE_NOT_PERMITTED",
       "Terminal trades need a person's tap; agent requests are refused.",
     );
+  }
+  if (signer === "browser-wallet") {
+    if (!browserWalletAllowed(access.mode)) {
+      throw tradeError(
+        "TERMINAL_TRADE_NOT_PERMITTED",
+        "Trading is disabled for this agent, including browser wallet trades.",
+        { context: { mode: access.mode } },
+      );
+    }
+    return;
   }
   if (!canUseLocalTradeExecution(access.mode, false)) {
     throw tradeError(
@@ -372,6 +396,7 @@ export function describeTerminalTrading(
   return {
     tradePermissionMode: mode,
     realTradingEnabled: canUseLocalTradeExecution(mode, false),
+    browserWalletEnabled: browserWalletAllowed(mode),
     wallet: describeWallet(agentRuntime),
     maxBuySol: resolveMaxBuySol(agentRuntime),
     slippageChoicesBps: [...TERMINAL_TRADE_SLIPPAGE_BPS],
@@ -388,6 +413,7 @@ type ParsedReviewRequest = {
   amount: string;
   slippageBps: number;
   sendRoute: WalletTerminalTradeSendRoute;
+  signer: WalletTerminalTradeSigner;
 } & ({ side: "buy"; lamports: bigint } | { side: "sell"; lamports: null });
 
 function invalid(message: string): ElizaError {
@@ -411,6 +437,33 @@ function parseMint(value: unknown): string {
     throw invalid("Pick the token to trade against SOL, not SOL itself.");
   }
   return mint;
+}
+
+function parseSigner(value: unknown): WalletTerminalTradeSigner {
+  if (typeof value !== "object" || value === null) {
+    throw invalid(
+      'signer must be { kind: "agent-wallet" } or { kind: "browser-wallet", address }.',
+    );
+  }
+  const { kind, address } = value as { kind?: unknown; address?: unknown };
+  if (kind === "agent-wallet") return { kind };
+  if (kind !== "browser-wallet") {
+    throw invalid('signer.kind must be "agent-wallet" or "browser-wallet".');
+  }
+  if (typeof address !== "string") {
+    throw invalid("Connect a browser wallet before reviewing a trade.");
+  }
+  let key: PublicKey;
+  try {
+    key = new PublicKey(address);
+  } catch {
+    // error-policy:J3 an undecodable wallet address is an invalid request.
+    throw invalid("The browser wallet address isn't a Solana address.");
+  }
+  if (key.toBase58() !== address) {
+    throw invalid("The browser wallet address isn't a Solana address.");
+  }
+  return { kind, address };
 }
 
 function parseReviewRequest(
@@ -442,6 +495,7 @@ function parseReviewRequest(
     throw invalid('sendRoute must be "rpc" or "jito".');
   }
   const route = sendRoute as WalletTerminalTradeSendRoute;
+  const signer = parseSigner(body.signer);
   if (side === "sell") {
     return {
       side,
@@ -449,6 +503,7 @@ function parseReviewRequest(
       amount,
       slippageBps,
       sendRoute: route,
+      signer,
       lamports: null,
     };
   }
@@ -456,7 +511,15 @@ function parseReviewRequest(
   if (lamports === null) {
     throw invalid("SOL amounts have at most 9 decimal places.");
   }
-  return { side, mint, amount, slippageBps, sendRoute: route, lamports };
+  return {
+    side,
+    mint,
+    amount,
+    slippageBps,
+    sendRoute: route,
+    signer,
+    lamports,
+  };
 }
 
 function assertWithinBuyLimit(
@@ -536,9 +599,10 @@ export async function reviewTerminalTrade(
   access: TerminalTradeAccess,
   body: Record<string, unknown>,
 ): Promise<WalletTerminalTradeReview> {
-  assertPermitted(access);
+  if (access.fromAgent) assertPermitted(access, "agent-wallet");
   const agentRuntime = requireRuntime(runtime);
   const request = parseReviewRequest(body);
+  assertPermitted(access, request.signer.kind);
   const maxBuySol = resolveMaxBuySol(agentRuntime);
   if (request.side === "buy") {
     assertWithinBuyLimit(request, maxBuySol, request.lamports);
@@ -550,17 +614,20 @@ export async function reviewTerminalTrade(
           ...resolveJitoRoute(agentRuntime),
         }
       : null;
-  const signer = resolveSigner(agentRuntime);
-  const walletAddress = signer.publicKey.toBase58();
+  const signerKey =
+    request.signer.kind === "browser-wallet"
+      ? new PublicKey(request.signer.address)
+      : resolveSigner(agentRuntime).publicKey;
+  const walletAddress = signerKey.toBase58();
   const { build, outputDecimals } = await buildSwap(
     agentRuntime,
     request,
-    signer.publicKey,
+    signerKey,
     jito?.tipLamports ?? null,
   );
 
   const feePayer = build.transaction.message.staticAccountKeys[0];
-  if (!feePayer?.equals(signer.publicKey)) {
+  if (!feePayer?.equals(signerKey)) {
     throw tradeError(
       "TERMINAL_TRADE_REFUSED",
       "Jupiter built this swap for a different wallet, so it was not used.",
@@ -623,15 +690,17 @@ export async function reviewTerminalTrade(
   prunePendingTrades(now);
   const reviewId = crypto.randomUUID();
   const expiresAt = now + TERMINAL_TRADE_REVIEW_TTL_MS;
+  const unsignedTransaction = build.transaction.serialize();
   pendingTrades.set(reviewId, {
     expiresAt,
     walletAddress,
-    unsignedTransaction: build.transaction.serialize(),
+    unsignedTransaction,
     lastValidBlockHeight: build.lastValidBlockHeight,
     canConfirm: simulation.success,
     side: request.side,
     mint: request.mint,
     sending,
+    signer: request.signer.kind,
     used: false,
   });
 
@@ -654,6 +723,14 @@ export async function reviewTerminalTrade(
     sending: { ...sending },
     simulation: { ...simulation, logs: [...simulation.logs] },
     canConfirm: simulation.success,
+    signing:
+      request.signer.kind === "browser-wallet"
+        ? {
+            kind: "browser-wallet",
+            unsignedTransaction:
+              Buffer.from(unsignedTransaction).toString("base64"),
+          }
+        : { kind: "agent-wallet" },
   };
 }
 
@@ -760,6 +837,59 @@ async function sendThroughJito(
   );
 }
 
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((byte, index) => byte === b[index]);
+}
+
+/**
+ * Accept a browser wallet's signed transaction only if it is the reviewed
+ * message, unchanged, carrying a valid signature from the reviewed wallet.
+ */
+function acceptBrowserSignature(
+  pending: PendingTerminalTrade,
+  value: unknown,
+): VersionedTransaction {
+  if (typeof value !== "string" || value.length === 0) {
+    throw invalid("signedTransaction is required for a browser wallet trade.");
+  }
+  let signed: VersionedTransaction;
+  try {
+    signed = VersionedTransaction.deserialize(
+      new Uint8Array(Buffer.from(value, "base64")),
+    );
+  } catch {
+    // error-policy:J3 bytes that aren't a transaction are an invalid request.
+    throw invalid("signedTransaction isn't a Solana transaction.");
+  }
+  const reviewed = VersionedTransaction.deserialize(
+    pending.unsignedTransaction,
+  );
+  const message = signed.message.serialize();
+  if (!bytesEqual(message, reviewed.message.serialize())) {
+    throw tradeError(
+      "TERMINAL_TRADE_REFUSED",
+      "The wallet changed the transaction while signing, so it was not sent. Review the trade again.",
+      { context: { walletAddress: pending.walletAddress } },
+    );
+  }
+  const signature = signed.signatures[0];
+  if (
+    !signature ||
+    !nacl.sign.detached.verify(
+      message,
+      signature,
+      new PublicKey(pending.walletAddress).toBytes(),
+    )
+  ) {
+    throw tradeError(
+      "TERMINAL_TRADE_REFUSED",
+      "The wallet's signature doesn't match the reviewed wallet, so the trade was not sent.",
+      { context: { walletAddress: pending.walletAddress } },
+    );
+  }
+  return signed;
+}
+
 function explorerUrl(signature: string): string {
   return `https://solscan.io/tx/${signature}`;
 }
@@ -767,14 +897,15 @@ function explorerUrl(signature: string): string {
 /**
  * Sign and send the exact transaction a review holds, once. Refuses an
  * unknown, used, or expired review, a failed simulation, and a wallet that
- * changed since the review.
+ * changed since the review. A browser wallet review takes the wallet's signed
+ * transaction instead of signing here.
  */
 export async function executeTerminalTrade(
   runtime: IAgentRuntime | null,
   access: TerminalTradeAccess,
   body: Record<string, unknown>,
 ): Promise<WalletTerminalTradeExecuteResponse> {
-  assertPermitted(access);
+  if (access.fromAgent) assertPermitted(access, "agent-wallet");
   const agentRuntime = requireRuntime(runtime);
   if (typeof body.reviewId !== "string" || body.reviewId.length === 0) {
     throw invalid("reviewId is required.");
@@ -809,24 +940,38 @@ export async function executeTerminalTrade(
       "The simulation failed, so this trade can't be sent.",
     );
   }
-  // Claimed before any await so a second tap can't send it twice.
-  pending.used = true;
+  assertPermitted(access, pending.signer);
 
-  const signer = resolveSigner(agentRuntime);
-  if (signer.publicKey.toBase58() !== pending.walletAddress) {
-    throw tradeError(
-      "TERMINAL_TRADE_REVIEW_CLOSED",
-      "The wallet changed since this review. Review the trade again.",
+  let signed: VersionedTransaction;
+  if (pending.signer === "browser-wallet") {
+    signed = acceptBrowserSignature(pending, body.signedTransaction);
+    // Claimed before any await so a second tap can't send it twice.
+    pending.used = true;
+  } else {
+    if (body.signedTransaction !== undefined) {
+      throw invalid(
+        "This trade is signed by the agent wallet; don't send a signed transaction.",
+      );
+    }
+    // Claimed before any await so a second tap can't send it twice.
+    pending.used = true;
+    const signer = resolveSigner(agentRuntime);
+    if (signer.publicKey.toBase58() !== pending.walletAddress) {
+      throw tradeError(
+        "TERMINAL_TRADE_REVIEW_CLOSED",
+        "The wallet changed since this review. Review the trade again.",
+      );
+    }
+    const result = await signer.signTransaction(
+      VersionedTransaction.deserialize(pending.unsignedTransaction),
     );
-  }
-  const signed = await signer.signTransaction(
-    VersionedTransaction.deserialize(pending.unsignedTransaction),
-  );
-  if (!(signed instanceof VersionedTransaction)) {
-    throw tradeError(
-      "TERMINAL_TRADE_WALLET_UNAVAILABLE",
-      "The wallet returned a different kind of transaction than it was given.",
-    );
+    if (!(result instanceof VersionedTransaction)) {
+      throw tradeError(
+        "TERMINAL_TRADE_WALLET_UNAVAILABLE",
+        "The wallet returned a different kind of transaction than it was given.",
+      );
+    }
+    signed = result;
   }
   const signatureBytes = signed.signatures[0];
   if (!signatureBytes) {

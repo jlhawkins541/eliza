@@ -6,9 +6,12 @@
  * gate, agent refusal, review details, executing exactly the reviewed bytes
  * with a verifiable signature, single use, expiry, failed simulations, the buy
  * limit, wallet and fee-payer mismatches, input validation, send outcomes,
- * and the Jito route (tip in the swap request, bundle-only send, settings).
+ * the Jito route (tip in the swap request, bundle-only send, settings), and
+ * browser wallet signing (the person's wallet signs the reviewed bytes, and
+ * execute accepts only that message with a valid signature from the reviewed
+ * address).
  */
-import { VersionedTransaction } from "@solana/web3.js";
+import { Keypair, VersionedTransaction } from "@solana/web3.js";
 import bs58 from "bs58";
 import nacl from "tweetnacl";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -35,6 +38,7 @@ function buy(h: TerminalTradeHarness, amount = "0.5") {
     amount,
     slippageBps: 100,
     sendRoute: "rpc",
+    signer: { kind: "agent-wallet" },
   };
 }
 
@@ -63,6 +67,7 @@ describe("terminal trade status", () => {
       body: {
         tradePermissionMode: "user-sign-only",
         realTradingEnabled: false,
+        browserWalletEnabled: true,
         wallet: { canSign: true, address: h.wallet.publicKey.toBase58() },
         maxBuySol: 1,
         slippageChoicesBps: [50, 100, 300],
@@ -200,6 +205,7 @@ describe("terminal trade review and execute", () => {
         unitsConsumed: 61_250,
       },
       canConfirm: true,
+      signing: { kind: "agent-wallet" },
     });
     const quoteUrl = new URL(h.jupiterCalls[0] ?? "");
     expect(quoteUrl.searchParams.get("amount")).toBe("500000000");
@@ -260,6 +266,7 @@ describe("terminal trade review and execute", () => {
       amount: "2500.5",
       slippageBps: 50,
       sendRoute: "jito",
+      signer: { kind: "agent-wallet" },
     });
     expect(review.status).toBe(200);
     expect(review.body).toMatchObject({
@@ -360,6 +367,16 @@ describe("terminal trade review and execute", () => {
       [{ ...buy(h), slippageBps: 2_000 }, /slippageBps must be one of/],
       [{ ...buy(h), sendRoute: "fast" }, /sendRoute must be "rpc" or "jito"/],
       [{ ...buy(h), sendRoute: undefined }, /sendRoute must be/],
+      [{ ...buy(h), signer: undefined }, /signer must be/],
+      [{ ...buy(h), signer: { kind: "ledger" } }, /signer.kind must be/],
+      [
+        { ...buy(h), signer: { kind: "browser-wallet" } },
+        /Connect a browser wallet/,
+      ],
+      [
+        { ...buy(h), signer: { kind: "browser-wallet", address: "nope" } },
+        /isn't a Solana address/,
+      ],
     ];
     for (const [body, error] of cases) {
       const review = await h.request("POST", REVIEW, body);
@@ -615,5 +632,233 @@ describe("terminal trade Jito route", () => {
       confirm: true,
     });
     expect(again.status).toBe(409);
+  });
+});
+
+describe("terminal trade browser wallet signing", () => {
+  function phantomBuy(h: TerminalTradeHarness, phantom: Keypair) {
+    return {
+      ...buy(h),
+      signer: { kind: "browser-wallet", address: phantom.publicKey.toBase58() },
+    };
+  }
+
+  /** What a browser wallet's signTransaction returns: the reviewed bytes, signed. */
+  function phantomSign(unsigned: string, phantom: Keypair): string {
+    const transaction = VersionedTransaction.deserialize(
+      new Uint8Array(Buffer.from(unsigned, "base64")),
+    );
+    transaction.sign([phantom]);
+    return Buffer.from(transaction.serialize()).toString("base64");
+  }
+
+  async function phantomReview(
+    h: TerminalTradeHarness,
+    phantom: Keypair,
+  ): Promise<{ reviewId: string; unsigned: string }> {
+    h.swapPayer = phantom.publicKey;
+    const review = await h.request("POST", REVIEW, phantomBuy(h, phantom));
+    expect(review.status).toBe(200);
+    const signing = review.body.signing as { unsignedTransaction: string };
+    return {
+      reviewId: review.body.reviewId as string,
+      unsigned: signing.unsignedTransaction,
+    };
+  }
+
+  it("builds for the browser wallet in sign-only mode and sends exactly what it signed", async () => {
+    const h = await createTerminalTradeHarness({ mode: "user-sign-only" });
+    const phantom = Keypair.generate();
+    h.swapPayer = phantom.publicKey;
+    const review = await h.request("POST", REVIEW, phantomBuy(h, phantom));
+    expect(review.status).toBe(200);
+    expect(review.body).toMatchObject({
+      walletAddress: phantom.publicKey.toBase58(),
+      canConfirm: true,
+      signing: {
+        kind: "browser-wallet",
+        unsignedTransaction: Buffer.from(
+          (h.built[0] as VersionedTransaction).serialize(),
+        ).toString("base64"),
+      },
+    });
+    expect(h.swapRequests[0]?.userPublicKey).toBe(phantom.publicKey.toBase58());
+    expect(h.sent).toEqual([]);
+
+    const signing = review.body.signing as { unsignedTransaction: string };
+    const execute = await h.request("POST", EXECUTE, {
+      reviewId: review.body.reviewId,
+      confirm: true,
+      signedTransaction: phantomSign(signing.unsignedTransaction, phantom),
+    });
+    expect(execute.status).toBe(200);
+    expect(execute.body.status).toBe("confirmed");
+    expect(h.sent).toHaveLength(1);
+    const sent = VersionedTransaction.deserialize(h.sent[0] as Uint8Array);
+    expect(Buffer.from(sent.message.serialize())).toEqual(
+      Buffer.from((h.built[0] as VersionedTransaction).message.serialize()),
+    );
+    const signature = sent.signatures[0] as Uint8Array;
+    expect(
+      nacl.sign.detached.verify(
+        sent.message.serialize(),
+        signature,
+        phantom.publicKey.toBytes(),
+      ),
+    ).toBe(true);
+    expect(execute.body.signature).toBe(bs58.encode(signature));
+
+    const again = await h.request("POST", EXECUTE, {
+      reviewId: review.body.reviewId,
+      confirm: true,
+      signedTransaction: phantomSign(signing.unsignedTransaction, phantom),
+    });
+    expect(again.status).toBe(409);
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it("sends a browser wallet trade through Jito when that route was reviewed", async () => {
+    const h = await createTerminalTradeHarness({ mode: "user-sign-only" });
+    const phantom = Keypair.generate();
+    h.swapPayer = phantom.publicKey;
+    const review = await h.request("POST", REVIEW, {
+      ...phantomBuy(h, phantom),
+      sendRoute: "jito",
+    });
+    expect(review.status).toBe(200);
+    const signing = review.body.signing as { unsignedTransaction: string };
+    const execute = await h.request("POST", EXECUTE, {
+      reviewId: review.body.reviewId,
+      confirm: true,
+      signedTransaction: phantomSign(signing.unsignedTransaction, phantom),
+    });
+    expect(execute.body.status).toBe("confirmed");
+    expect(h.sent).toEqual([]);
+    expect(h.jitoSends).toHaveLength(1);
+  });
+
+  it("refuses a transaction the wallet changed while signing", async () => {
+    const h = await createTerminalTradeHarness({ mode: "user-sign-only" });
+    const phantom = Keypair.generate();
+    const { reviewId: id } = await phantomReview(h, phantom);
+    // A different message, validly signed by the same wallet.
+    const other = VersionedTransaction.deserialize(
+      (h.built[0] as VersionedTransaction).serialize(),
+    );
+    other.message.recentBlockhash = Keypair.generate().publicKey.toBase58();
+    other.sign([phantom]);
+    const execute = await h.request("POST", EXECUTE, {
+      reviewId: id,
+      confirm: true,
+      signedTransaction: Buffer.from(other.serialize()).toString("base64"),
+    });
+    expect(execute).toEqual({
+      status: 422,
+      body: {
+        error:
+          "The wallet changed the transaction while signing, so it was not sent. Review the trade again.",
+      },
+    });
+    expect(h.sent).toEqual([]);
+  });
+
+  it("refuses a signature from any key but the reviewed wallet, and unsigned or missing bytes", async () => {
+    const h = await createTerminalTradeHarness({ mode: "user-sign-only" });
+    const phantom = Keypair.generate();
+    const { reviewId: id, unsigned } = await phantomReview(h, phantom);
+
+    const forged = VersionedTransaction.deserialize(
+      new Uint8Array(Buffer.from(unsigned, "base64")),
+    );
+    forged.signatures[0] = nacl.sign.detached(
+      forged.message.serialize(),
+      Keypair.generate().secretKey,
+    );
+    const wrongKey = await h.request("POST", EXECUTE, {
+      reviewId: id,
+      confirm: true,
+      signedTransaction: Buffer.from(forged.serialize()).toString("base64"),
+    });
+    expect(wrongKey.status).toBe(422);
+    expect(wrongKey.body.error).toMatch(/signature doesn't match/);
+
+    const unsignedSend = await h.request("POST", EXECUTE, {
+      reviewId: id,
+      confirm: true,
+      signedTransaction: unsigned,
+    });
+    expect(unsignedSend.status).toBe(422);
+
+    const missing = await h.request("POST", EXECUTE, {
+      reviewId: id,
+      confirm: true,
+    });
+    expect(missing.status).toBe(400);
+    expect(missing.body.error).toMatch(/signedTransaction is required/);
+
+    const garbage = await h.request("POST", EXECUTE, {
+      reviewId: id,
+      confirm: true,
+      signedTransaction: Buffer.from("not a transaction").toString("base64"),
+    });
+    expect(garbage.status).toBe(400);
+    expect(h.sent).toEqual([]);
+
+    // Refusals leave the review open for the real signature.
+    const ok = await h.request("POST", EXECUTE, {
+      reviewId: id,
+      confirm: true,
+      signedTransaction: phantomSign(unsigned, phantom),
+    });
+    expect(ok.body.status).toBe("confirmed");
+  });
+
+  it("refuses a swap Jupiter built for a wallet other than the browser wallet", async () => {
+    const h = await createTerminalTradeHarness({ mode: "user-sign-only" });
+    const review = await h.request(
+      "POST",
+      REVIEW,
+      phantomBuy(h, Keypair.generate()),
+    );
+    expect(review.status).toBe(422);
+    expect(review.body.error).toMatch(/different wallet/);
+  });
+
+  it("refuses agent requests and keeps agent-wallet reviews separate", async () => {
+    const h = await createTerminalTradeHarness({ mode: "agent-auto" });
+    const phantom = Keypair.generate();
+    h.swapPayer = phantom.publicKey;
+    const agent = await h.request("POST", REVIEW, phantomBuy(h, phantom), {
+      "x-eliza-agent-action": "1",
+    });
+    expect(agent.status).toBe(403);
+    expect(h.jupiterCalls).toEqual([]);
+
+    const { reviewId: id, unsigned } = await phantomReview(h, phantom);
+    const agentExecute = await h.request(
+      "POST",
+      EXECUTE,
+      {
+        reviewId: id,
+        confirm: true,
+        signedTransaction: phantomSign(unsigned, phantom),
+      },
+      { "x-eliza-agent-action": "1" },
+    );
+    expect(agentExecute.status).toBe(403);
+
+    expect(h.sent).toEqual([]);
+
+    h.config.features.tradePermissionMode = "manual-local-key";
+    h.swapPayer = null;
+    const local = await reviewId(h);
+    const smuggled = await h.request("POST", EXECUTE, {
+      reviewId: local,
+      confirm: true,
+      signedTransaction: phantomSign(unsigned, phantom),
+    });
+    expect(smuggled.status).toBe(400);
+    expect(smuggled.body.error).toMatch(/signed by the agent wallet/);
+    expect(h.sent).toEqual([]);
   });
 });

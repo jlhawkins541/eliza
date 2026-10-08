@@ -15,11 +15,13 @@
  * a sample payload, including the thin-liquidity caution), and
  * the Real trade tab, served by the real wallet trade routes with Jupiter and
  * Solana RPC doubles and a real signer over a generated key; the agent's
- * trade-permission route is the one stand-in there.
+ * trade-permission route and Phantom's injected provider (signing with a
+ * generated key, as its popup would on approve) are the only stand-ins there.
  */
 import { readFileSync } from "node:fs";
 import type http from "node:http";
 import { resolve } from "node:path";
+import { Keypair, type PublicKey, VersionedTransaction } from "@solana/web3.js";
 import {
   act,
   cleanup,
@@ -29,6 +31,7 @@ import {
   within,
 } from "@testing-library/react";
 import React from "react";
+import nacl from "tweetnacl";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createTerminalExchangeHarness,
@@ -1027,6 +1030,140 @@ describe("CryptoTerminalView", () => {
         "This wallet can't place trades: This wallet can't sign Solana transactions here.",
       );
       expect(screen.queryByTestId("real-trade-mint")).toBeNull();
+    });
+
+    describe("with Phantom", () => {
+      type FakePhantom = {
+        isPhantom: true;
+        publicKey: PublicKey | null;
+        signed: VersionedTransaction[];
+        decline: boolean;
+        connect: () => Promise<{ publicKey: PublicKey }>;
+        disconnect: () => Promise<void>;
+        signTransaction: (
+          transaction: VersionedTransaction,
+        ) => Promise<VersionedTransaction>;
+      };
+
+      // Phantom's extension is the one stand-in: a provider with Phantom's
+      // injected API that signs with a generated key, as the popup would on
+      // approve.
+      function installPhantom(owner: Keypair): FakePhantom {
+        const provider: FakePhantom = {
+          isPhantom: true,
+          publicKey: null,
+          signed: [],
+          decline: false,
+          connect: async () => {
+            provider.publicKey = owner.publicKey;
+            return { publicKey: owner.publicKey };
+          },
+          disconnect: async () => {
+            provider.publicKey = null;
+          },
+          signTransaction: async (transaction) => {
+            if (provider.decline) {
+              throw Object.assign(new Error("User rejected the request."), {
+                code: 4001,
+              });
+            }
+            transaction.sign([owner]);
+            provider.signed.push(transaction);
+            return transaction;
+          },
+        };
+        (window as unknown as { phantom?: unknown }).phantom = {
+          solana: provider,
+        };
+        return provider;
+      }
+
+      afterEach(() => {
+        delete (window as unknown as { phantom?: unknown }).phantom;
+      });
+
+      async function connectPhantom() {
+        fireEvent.click(screen.getByRole("button", { name: "Real trade" }));
+        fireEvent.click(await screen.findByTestId("phantom-connect"));
+        return screen.findByTestId("phantom-account");
+      }
+
+      it("signs a reviewed buy in Phantom in sign-only mode and sends exactly what it signed", async () => {
+        trade = await createTerminalTradeHarness({ mode: "user-sign-only" });
+        const owner = Keypair.generate();
+        trade.swapPayer = owner.publicKey;
+        const phantom = installPhantom(owner);
+        render(<CryptoTerminalView />);
+        const account = await connectPhantom();
+        const address = owner.publicKey.toBase58();
+        expect(account.textContent).toBe(
+          `Phantom ${address.slice(0, 4)}…${address.slice(-4)}`,
+        );
+
+        await reviewBuy(trade.tokenMint);
+        expect(screen.getByTestId("real-trade-signer").textContent).toBe(
+          "Phantom",
+        );
+        expect(screen.getByRole("dialog").textContent).toContain(address);
+        expect(screen.getByTestId("real-trade-confirm").textContent).toBe(
+          "Confirm and sign in Phantom",
+        );
+        expect(phantom.signed).toEqual([]);
+
+        fireEvent.click(screen.getByTestId("real-trade-confirm"));
+        const result = await screen.findByTestId("real-trade-result");
+        expect(result.textContent).toContain("Trade confirmed on Solana.");
+        expect(phantom.signed).toHaveLength(1);
+        expect(trade.sent).toHaveLength(1);
+        const sent = VersionedTransaction.deserialize(
+          trade.sent[0] as Uint8Array,
+        );
+        expect(Buffer.from(sent.message.serialize())).toEqual(
+          Buffer.from(
+            (trade.built[0] as VersionedTransaction).message.serialize(),
+          ),
+        );
+        expect(
+          nacl.sign.detached.verify(
+            sent.message.serialize(),
+            sent.signatures[0] as Uint8Array,
+            owner.publicKey.toBytes(),
+          ),
+        ).toBe(true);
+        expect(trade.config.features.tradePermissionMode).toBe(
+          "user-sign-only",
+        );
+      });
+
+      it("sends nothing when the trade is declined in Phantom", async () => {
+        trade = await createTerminalTradeHarness({ mode: "user-sign-only" });
+        const owner = Keypair.generate();
+        trade.swapPayer = owner.publicKey;
+        const phantom = installPhantom(owner);
+        phantom.decline = true;
+        render(<CryptoTerminalView />);
+        await connectPhantom();
+        await reviewBuy(trade.tokenMint);
+        fireEvent.click(screen.getByTestId("real-trade-confirm"));
+        expect(
+          (await within(screen.getByRole("dialog")).findByRole("alert"))
+            .textContent,
+        ).toBe("You declined the signature in Phantom.");
+        expect(screen.queryByTestId("real-trade-result")).toBeNull();
+        expect(trade.sent).toEqual([]);
+      });
+
+      it("says Phantom isn't installed and leaves the agent wallet as the default", async () => {
+        trade = await createTerminalTradeHarness();
+        render(<CryptoTerminalView />);
+        await openRealTrade();
+        expect(screen.getByTestId("real-trade-mint")).toBeTruthy();
+        fireEvent.click(screen.getByRole("button", { name: "Phantom" }));
+        expect(screen.getByTestId("phantom-missing").textContent).toContain(
+          "Phantom isn't installed in this browser.",
+        );
+        expect(screen.queryByTestId("real-trade-mint")).toBeNull();
+      });
     });
   });
 

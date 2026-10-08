@@ -28,6 +28,7 @@ import type {
   WalletTerminalSocialSignalResponse,
   WalletTerminalTokenPairsResponse,
   WalletTerminalTokenSafetyResponse,
+  WalletTerminalTradeExecuteRequest,
   WalletTerminalTradeExecuteResponse,
   WalletTerminalTradeReview,
   WalletTerminalTradeReviewRequest,
@@ -748,8 +749,10 @@ export interface RealTradingHandle {
   review: (
     request: WalletTerminalTradeReviewRequest,
   ) => Promise<RealTradeOutcome<WalletTerminalTradeReview>>;
+  /** `signedTransaction` is the browser wallet's signature, for its reviews only. */
   execute: (
     reviewId: string,
+    signedTransaction?: string,
   ) => Promise<RealTradeOutcome<WalletTerminalTradeExecuteResponse>>;
 }
 
@@ -824,16 +827,21 @@ export function useRealTrading(): RealTradingHandle {
   );
 
   const execute = useCallback(
-    (reviewId: string) =>
-      attempt(() =>
+    (reviewId: string, signedTransaction?: string) => {
+      const body: WalletTerminalTradeExecuteRequest = {
+        reviewId,
+        confirm: true,
+      };
+      if (signedTransaction !== undefined) {
+        body.signedTransaction = signedTransaction;
+      }
+      return attempt(() =>
         client.fetch<WalletTerminalTradeExecuteResponse>(
           "/api/wallet/terminal/trade/execute",
-          {
-            method: "POST",
-            body: JSON.stringify({ reviewId, confirm: true }),
-          },
+          { method: "POST", body: JSON.stringify(body) },
         ),
-      ),
+      );
+    },
     [],
   );
 
