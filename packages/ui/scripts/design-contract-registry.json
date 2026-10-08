@@ -55,6 +55,26 @@
         "semantics.content"
       ],
       "lifecycleOwner": "vault-activation-and-navigation"
+    },
+    {
+      "id": "organism:wallet-dashboard",
+      "owner": {
+        "kind": "export",
+        "file": "plugins/plugin-wallet/src/ui/components/InventoryAppView.tsx",
+        "symbol": "InventoryAppView"
+      },
+      "responsibility": "Owns the full-screen wallet dashboard: its balances, NFT, and trading-profile fetch and poll lifecycle, and the holdings rail, activity log, movers, positions, and NFT panels it renders inside the inventory view and the crypto terminal.",
+      "dependsOn": ["atom:avatar", "atom:button", "atom:skeleton"],
+      "grants": [
+        "paint.surface",
+        "paint.border",
+        "paint.radius",
+        "interaction.activate",
+        "layout.container",
+        "layout.region",
+        "semantics.content"
+      ],
+      "lifecycleOwner": "wallet-data-pipeline"
     }
   ],
   "pageShells": [

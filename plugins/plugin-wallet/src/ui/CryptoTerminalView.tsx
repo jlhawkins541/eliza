@@ -16,6 +16,9 @@
  * {@link InventoryAppView}, which owns the wallet pipeline.
  */
 import {
+  Avatar,
+  AvatarFallback,
+  AvatarImage,
   Button,
   Dialog,
   DialogContent,
@@ -139,22 +142,17 @@ function changeTone(pct: number): string {
 }
 
 function AssetMark({ market }: { market: WalletTerminalMarket }) {
-  const [imageFailed, setImageFailed] = useState(false);
-  return market.imageUrl && !imageFailed ? (
-    <img
-      src={market.imageUrl}
-      alt=""
-      className="size-8 shrink-0 rounded-full"
-      loading="lazy"
-      onError={() => setImageFailed(true)}
-    />
-  ) : (
-    <span
-      aria-hidden="true"
-      className="grid size-8 shrink-0 place-items-center rounded-full bg-surface text-[0.6rem] font-semibold text-txt"
-    >
-      {market.symbol.slice(0, 4)}
-    </span>
+  // The Avatar atom swaps in the symbol monogram until the logo loads, and
+  // keeps it when the logo is missing or fails.
+  return (
+    <Avatar aria-hidden="true">
+      {market.imageUrl ? (
+        <AvatarImage src={market.imageUrl} alt="" loading="lazy" />
+      ) : null}
+      <AvatarFallback style={{ fontSize: "0.6rem" }} className="font-semibold">
+        {market.symbol.slice(0, 4)}
+      </AvatarFallback>
+    </Avatar>
   );
 }
 
