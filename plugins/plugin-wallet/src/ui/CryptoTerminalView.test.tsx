@@ -84,6 +84,11 @@ vi.mock("@elizaos/ui", () => {
       clear: () => globalThis.window.localStorage.clear(),
     },
     cn: (...values: unknown[]) => values.filter(Boolean).join(" "),
+    // jsdom never loads images, so the logo stays on its fallback monogram.
+    Avatar: (props: React.HTMLAttributes<HTMLSpanElement>) => h("span", props),
+    AvatarImage: () => null,
+    AvatarFallback: (props: React.HTMLAttributes<HTMLSpanElement>) =>
+      h("span", props),
     Button: ({
       variant: _variant,
       size: _size,
