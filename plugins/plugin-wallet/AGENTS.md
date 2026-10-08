@@ -20,11 +20,12 @@ Adds a unified wallet action+provider surface to an Eliza agent, replacing the p
 | `WALLET` | `token_info` | Read-only token/market data (DexScreener, Birdeye, CoinGecko). |
 | `WALLET` | `search_address` | Birdeye wallet/portfolio lookup by address. |
 | `WALLET` | `token_safety` | Read-only GoPlus rug-risk check of one Solana mint (authorities, Token-2022 extensions, holder concentration, liquidity) with an avoid/caution/no-major-flags verdict. |
+| `WALLET` | `onchain_token_safety` | Read-only on-chain Solana mint safety check from `SOLANA_RPC_URL` only (no API key, no signing; PROVIDER_UNAVAILABLE when unset): token program, supply, mint/freeze authority, Token-2022 risk extensions decoded, other extensions by name, largest token accounts' share of supply (accounts, not owners; RPC returns ≤20). A check that could not run reads UNKNOWN, never a pass. Dispatched before `runWalletRouter`; never reaches `WalletBackend`, SolanaService key paths or the confirmation gate. |
 | `WALLET` | `token_pairs` | Read-only DexScreener lookup of one Solana mint's pools (price, liquidity, 24h volume, pool age). No key. Total liquidity under $10K, an oldest pool under a day, or no pool reporting its age adds caution; it never clears a GoPlus flag. |
 | `WALLET` | `social_signal` | Read-only LunarCrush lookup by ticker (Galaxy Score, AltRank, sentiment, social volume). Needs `LUNARCRUSH_API_KEY`; without it, returns the add-a-key step and sends nothing. A Galaxy Score under 30 adds caution; the signal never clears a GoPlus flag. |
 | `TRADE` | `inspect_account`, `inspect_session`, `submit_order` | Governed Steward trading account/session inspection and confirmed order intent for Hyperliquid and Polymarket. |
 
-Similes handled: `SWAP`, `SWAP_SOLANA`, `TRANSFER`, `TRANSFER_TOKEN`, `WALLET_SWAP`, `WALLET_TRANSFER`, `CROSS_CHAIN_TRANSFER`, `PREPARE_TRANSFER`, `WALLET_ACTION`, `WALLET_GOV`, `PUMP_FUN_BUY`, `PUMPFUN_BUY`, `TOKEN_INFO`, `BIRDEYE_LOOKUP`, `BIRDEYE_SEARCH`, `WALLET_SEARCH_ADDRESS`.
+Similes handled: `SWAP`, `SWAP_SOLANA`, `TRANSFER`, `TRANSFER_TOKEN`, `WALLET_SWAP`, `WALLET_TRANSFER`, `CROSS_CHAIN_TRANSFER`, `PREPARE_TRANSFER`, `WALLET_ACTION`, `WALLET_GOV`, `PUMP_FUN_BUY`, `PUMPFUN_BUY`, `TOKEN_INFO`, `BIRDEYE_LOOKUP`, `BIRDEYE_SEARCH`, `WALLET_SEARCH_ADDRESS`, plus `TOKEN_SECURITY` (owned by the promoted `WALLET_ONCHAIN_TOKEN_SAFETY` virtual, whose automatic simile is `ONCHAIN_TOKEN_SAFETY`). The parent also routes `action=TOKEN_SECURITY` to `onchain_token_safety`. The on-chain virtual deliberately claims neither `TOKEN_SAFETY` nor `CHECK_TOKEN_SAFETY`: the third-party plugin-x402-finance registers an action named `CHECK_TOKEN_SAFETY` with simile `TOKEN_SAFETY` for its EVM honeypot check. Note that promotion gives the GoPlus `token_safety` subaction's virtual (`WALLET_TOKEN_SAFETY`) the automatic simile `TOKEN_SAFETY`, so that name is shared with plugin-x402-finance when both plugins are loaded.
 
 All on-chain subactions (`transfer`, `swap`, `bridge`, `gov`, `pump_fun_buy`) require a user confirmation turn before execution. `mode=prepare` (default) stages without signing. Setting `mode=execute` does **not** bypass the gate — submission only happens after a confirmed reply turn. `dryRun=true` returns metadata without signing. `mode=simulate` (GH #16613) is a third, non-broadcasting mode: the handler builds the real transaction (real Jupiter quote/swap-tx or real PumpPortal trade-local build, whichever the subaction uses) and runs `connection.simulateTransaction({ sigVerify: false, replaceRecentBlockhash: true })` against it instead of signing and sending. It needs only the wallet's public key — never a private key or a `WalletBackend` signer — so it cannot authorize or lead to a live submission, and it skips the confirmation gate entirely (`requiresWalletFinancialConfirmation` returns `false` for it, same as `dryRun`). An RPC-reported revert is a *typed, successful* simulation (`success: false` with `err`/`logs`), never a thrown error or a fabricated success. Supported today for Solana `swap` and `pump_fun_buy` only; every other handler/subaction combination returns a typed `SIMULATION_UNSUPPORTED` router failure rather than silently falling back to `execute()` or the `prepare` echo.
 
@@ -125,6 +126,7 @@ plugins/plugin-wallet/
                                (shared with the terminal's token safety route)
       lunarcrush/              LunarCrush v4 social signal client + WALLET social_signal handler
                                (shared with the terminal's social route)
+      token-safety/            On-chain Solana mint safety check (WALLET onchain_token_safety)
       lpinfo/                  kaminoPlugin, lpinfoPlugin, steerPlugin re-exports
       news/                    defiNewsPlugin, NewsDataService
     lp/
@@ -155,8 +157,10 @@ plugins/plugin-wallet/
                                low-level SDK stdio glue (server.ts), `mcp` entry
     routes/
       plugin.ts                Additional plugin route exports
-      wallet-terminal-market-route.ts  Public read-only CoinGecko market list and
-                               price history for the crypto terminal
+      wallet-terminal-market-route.ts  Public read-only market list and price
+                               history for the crypto terminal: CoinGecko, falling
+                               back to CoinPaprika when CoinGecko fails
+      coinpaprika-backup.ts    CoinPaprika URLs and parsers for that backup
       wallet-terminal-token-safety-route.ts  Public read-only GoPlus Solana token
                                safety report (checks + avoid/caution verdict)
       wallet-terminal-pairs-route.ts  Public read-only DexScreener pools and liquidity
@@ -207,7 +211,7 @@ bun run --cwd plugins/plugin-wallet test          # run package tests
 bun run --cwd plugins/plugin-wallet test:watch    # watch test lane
 bun run --cwd plugins/plugin-wallet build:views   # standalone view bundle → dist/views/bundle.js
 bun run --cwd plugins/plugin-wallet build:ui-types # UI declaration emit (tsconfig.ui.json)
-bun run --cwd plugins/plugin-wallet check:crypto-queen # check packages/agent/.env for the Crypto Queen agent
+bun run --cwd plugins/plugin-wallet check:crypto-queen # check packages/agent/.env and every connection Crypto Queen uses
 bun run --cwd plugins/plugin-wallet mcp           # read-only terminal MCP server over stdio (needs the running agent)
 ```
 
@@ -221,14 +225,14 @@ All read via `runtime.getSetting()` (or `process.env` fallback where noted).
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ELIZA_WALLET_BACKEND` | No | `local` \| `steward` \| `auto` (default: `auto`). Auto = Steward when cloud-provisioned, else local. |
+| `ELIZA_WALLET_BACKEND` | No | `local` \| `steward` \| `auto` (default: `auto`; case and spaces ignored). Auto = Steward when cloud-provisioned, else local. Any other value fails with `WALLET_BACKEND_MODE_INVALID` instead of falling back to auto. |
 | `EVM_PRIVATE_KEY` | Local backend | 32-byte hex, 0x-prefixed. Local EOA signing key for EVM. |
 | `SOLANA_PRIVATE_KEY` | Solana local | Base58-encoded Solana private key. |
 | `STEWARD_API_URL` | Steward backend | Steward API base URL. |
 | `STEWARD_AGENT_ID` | Steward backend | Agent identifier for Steward. |
 | `STEWARD_AGENT_TOKEN` | Steward backend | Bearer token for Steward. |
 | `STEWARD_TENANT_ID` | Steward backend | Tenant/user identifier. |
-| `SOLANA_RPC_URL` | Solana features | RPC endpoint; skips Solana init if absent. |
+| `SOLANA_RPC_URL` | Solana features | RPC endpoint; skips Solana init if absent. Read directly by onchain_token_safety (no fallback). |
 | `JUPITER_API_BASE_URL` | No | Jupiter Swap API base URL. Defaults to `https://lite-api.jup.ag/swap/v1`. |
 | `SOLANA_NO_ACTIONS` | No | Set to `true` to skip Solana action registration. |
 | `PUMPFUN_TRADE_LOCAL_URL` | No | PumpPortal local transaction API. Defaults to `https://pumpportal.fun/api/trade-local`. |
@@ -241,7 +245,7 @@ All read via `runtime.getSetting()` (or `process.env` fallback where noted).
 | `COINGECKO_API_KEY` | No | CoinGecko API key (also accepts `COINGECKO_DEMO_API_KEY` / `COINGECKO_PRO_API_KEY`). |
 | `HELIUS_API_KEY` | No | Helius API key for enhanced Solana RPC. |
 | `ELIZAOS_CLOUD_API_KEY` | No | Eliza Cloud API key for cloud-routing fallbacks. |
-| `ELIZA_WALLET_EXPORT_TOKEN` | No | Auth token required to export wallet keys via HTTP routes. |
+| `ELIZA_WALLET_EXPORT_TOKEN` | No | Unused by this plugin: `POST /api/wallet/export` answers 410, so keys never leave `packages/agent/.env` over HTTP. |
 | `WALLET_TERMINAL_MAX_BUY_SOL` | No | Largest SOL amount one crypto terminal buy may spend. Defaults to `1`; a non-positive or non-numeric value is an error, not a fallback. |
 | `WALLET_TERMINAL_JITO_TIP_LAMPORTS` | No | Tip a crypto terminal trade sent through Jito pays. Defaults to `100000`; must be a whole number from `1000` (Jito's minimum) to `4000000` (the RPC route's priority-fee cap), otherwise an error. |
 | `KRAKEN_API_KEY`, `KRAKEN_API_SECRET` | No | Kraken API key and base64 secret for terminal exchange orders. Server-side only; trade rights only, never withdrawal rights. |
@@ -251,6 +255,7 @@ All read via `runtime.getSetting()` (or `process.env` fallback where noted).
 | `ELIZA_TERMINAL_MCP_URL` | No | http(s) origin of the agent the terminal MCP server reads from. Defaults to `http://127.0.0.1:<agent port>`; anything with a path, query or credentials, or plain http to a host other than this machine, is an error. |
 | `LUNARCRUSH_API_KEY` | No | LunarCrush API v4 key for the terminal's Social row and `WALLET action=social_signal`. Server-side only; never sent to the browser, logged, or returned. Unset means "Add a LunarCrush key" and no request. |
 | `JITO_BLOCK_ENGINE_URL` | No | https Jito block engine the terminal's Jito route sends to. Defaults to `https://mainnet.block-engine.jito.wtf`. |
+| `JITO_BLOCK_ENGINE_BACKUP_URLS` | No | Comma-separated https block engines tried in order when the first is unreachable or answers 429/5xx; the same signed bytes go to each, so a trade lands at most once. Defaults to Jito's ny, amsterdam, frankfurt and tokyo regions; `none` turns backups off. |
 | `X402_SUPPORTED_NETWORKS` | No | Comma-separated network list for x402 SDK. |
 | `X402_GLOBAL_DAILY_LIMIT` | No | Daily USDC spend cap for x402. |
 | `X402_PER_REQUEST_MAX` | No | Per-request USDC cap for x402. |
@@ -281,6 +286,7 @@ Extend `src/analytics/birdeye/service.ts`. The service proxies all calls through
 - **Financial confirmation gate.** All on-chain subactions (`transfer`, `swap`, `bridge`, `gov`, `pump_fun_buy`) go through `gateWalletFinancialExecution` in `src/security/wallet-financial-confirmation.ts`, which calls `requireConfirmation` from `@elizaos/core`. The LLM cannot bypass this by passing `mode=execute` alone — a confirmed reply turn is always required. Do not remove or short-circuit this gate. The crypto terminal's real trades are a separate, person-only path with their own gate (see the crypto terminal convention below); never route agent actions through it.
 - **`WalletBackend` is the only signing path.** Providers and actions must never read raw private key env vars directly. Go through `WalletBackendService.getWalletBackend()` → `WalletBackend`.
 - **pump.fun buy path.** `pump_fun_buy` is a Solana handler alias (`pumpfun`, `pump.fun`, `pump-fun`, `pump`) that requires `toToken`/`token` as a valid Solana mint and `amount` as SOL. It requests a serialized transaction from PumpPortal trade-local, signs through `WalletBackend.getSolanaSigner()` when available (falling back to the existing local `getWalletKey` Solana path), opens the token page through the optional browser service when available, then submits through `SOLANA_RPC_URL`. `mode=simulate` (GH #16613) shares the trade-local build (`fetchPumpFunTransaction`) but resolves only a public key (`resolvePumpFunPublicKey`, never `WalletBackend.getSolanaSigner()`/local keypair), skips the browser coin-page open, and runs `connection.simulateTransaction` instead of signing/sending.
+- **onchain_token_safety is key-free and read-only.** It builds its own web3.js `Connection` from `SOLANA_RPC_URL` (`disableRetryOnRateLimit`, a 10 s `fetchMiddleware` deadline) and reads the mint with `getAccountInfoAndContext`, because `getAccountInfo` erases error types. It never calls `getWalletKey` or SolanaService key methods, which create and save a keypair, and never calls spl-token `getExtensionTypes` or `getExtensionData` on untrusted TLV (it walks the TLV with bounds checks instead). The RPC URL can embed a key, so the full URL, the password and every credential-named query value (`api-key`, `token`, `auth`, …) of any length, and each other component of 8 or more characters (query values, path segments, userinfo, host) are redacted from every message, and the URL never enters data, context or logs. Only a network-level failure (Node's `TypeError("fetch failed")`, a TypeError whose cause carries a socket code, or a Bun socket code) counts as `TRANSPORT_FAILED`; any other TypeError is `TOKEN_SAFETY_RPC_FAILED` and reaches the action boundary instead of degrading a check. Provider error bodies are kept complete in data and escaped onto one line in the text. Public RPCs often rate-limit `getTokenLargestAccounts`, so `holder_concentration` reads UNKNOWN there.
 - **`handleWalletRoutes` is dependency-injected.** It imports nothing from `@elizaos/agent` to avoid a cycle. All agent-internal helpers (runtime lookup, auth, route helpers) are passed via `WalletRouteContext.deps` by `@elizaos/agent`'s server wiring.
 - **Sub-plugins.** `evmPlugin` and `solanaPlugin` are composed into `walletPlugin` in `plugin.ts`. They are not intended to be loaded directly; always depend on `@elizaos/plugin-wallet`.
 - **`SDK-LICENSE`** covers the `src/sdk/` subtree (originally from agent-wallet-sdk, MIT).

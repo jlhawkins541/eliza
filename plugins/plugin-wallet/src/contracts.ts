@@ -50,7 +50,10 @@ export interface WalletMarketPrediction {
   imageUrl: string | null;
 }
 
-export type WalletMarketOverviewProviderId = "coingecko" | "polymarket";
+export type WalletMarketOverviewProviderId =
+  | "coingecko"
+  | "coinpaprika"
+  | "polymarket";
 
 export interface WalletMarketOverviewSource {
   providerId: WalletMarketOverviewProviderId;
@@ -430,7 +433,12 @@ export interface WalletTerminalTradeStatusResponse {
   /** How long a review can be confirmed, in seconds. */
   reviewSeconds: number;
   /** The tip and block engine a `jito` send uses. */
-  jito: { tipLamports: number; blockEngineUrl: string };
+  jito: {
+    tipLamports: number;
+    blockEngineUrl: string;
+    /** Regions tried in order when the first engine is unreachable or busy. */
+    backupBlockEngineUrls: string[];
+  };
 }
 
 /** Body of POST /api/wallet/terminal/trade/review. */
@@ -500,7 +508,12 @@ export interface WalletTerminalTradeReview {
   /** Where the signed transaction goes on confirm. */
   sending:
     | { route: "rpc"; detail: string }
-    | { route: "jito"; blockEngineUrl: string; detail: string };
+    | {
+        route: "jito";
+        blockEngineUrl: string;
+        backupBlockEngineUrls: string[];
+        detail: string;
+      };
   simulation: WalletTerminalTradeSimulation;
   /** False when the simulation failed; such a review cannot be confirmed. */
   canConfirm: boolean;

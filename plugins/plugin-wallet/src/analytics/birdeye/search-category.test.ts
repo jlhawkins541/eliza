@@ -208,5 +208,127 @@ describe("Birdeye search categories", () => {
     expect(result.results[0].chain).toBe("base");
     expect(result.text).toContain("mode: address");
     expect(result.text).toContain("Aave");
+    expect(result.text).toContain('"not_requested"');
+  });
+
+  const SOLANA_MINT = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
+
+  function solanaProvider(security: unknown) {
+    return {
+      fetchSearchTokenMarketData: vi.fn(),
+      fetchTokenOverview: vi.fn(async () => ({
+        data: { name: "Bonk", symbol: "Bonk", decimals: 5 },
+      })),
+      fetchTokenMarketData: vi.fn(async () => ({ data: {} })),
+      fetchTokenSecurityByAddress: vi.fn(async () => security),
+      fetchTokenTradeDataSingle: vi.fn(async () => ({ data: {} })),
+    };
+  }
+
+  function securityLine(text: string): string {
+    const lines = text.split("\n");
+    const header = lines.findIndex((line) => line.includes("security[1]{"));
+    expect(header).toBeGreaterThanOrEqual(0);
+    return lines[header + 1];
+  }
+
+  it("auto-detects a Solana mint and renders its security checks", async () => {
+    const provider = solanaProvider({
+      success: true,
+      data: {
+        freezeable: true,
+        freezeAuthority: "FrzAuth1111111111111111111111111111111111111",
+        mutableMetadata: false,
+        top10HolderPercent: 0.4521,
+        creatorPercentage: 0.05,
+        ownerPercentage: 0,
+        isToken2022: true,
+        transferFeeEnable: true,
+        nonTransferable: false,
+        fakeToken: null,
+        jupStrictList: false,
+      },
+    });
+
+    const result = await searchBirdeyeTokens(
+      {} as IAgentRuntime,
+      { query: SOLANA_MINT, mode: "auto" },
+      provider as BirdeyeTokenSearchProvider,
+    );
+
+    expect(result.mode).toBe("address");
+    expect(provider.fetchSearchTokenMarketData).not.toHaveBeenCalled();
+    expect(provider.fetchTokenSecurityByAddress).toHaveBeenCalledWith(
+      { address: SOLANA_MINT },
+      { headers: { "x-chain": "solana" } },
+    );
+    expect(securityLine(result.text)).toBe(
+      `    - ${[
+        `"${SOLANA_MINT}"`,
+        '"ok"',
+        "true",
+        '"FrzAuth1111111111111111111111111111111111111"',
+        '"unknown"',
+        "false",
+        '"45.21%"',
+        '"5.00%"',
+        '"0.00%"',
+        "true",
+        "true",
+        "false",
+        '"unknown"',
+        "false",
+        '"unknown"',
+      ].join(",")}`,
+    );
+    expect(result.text).toContain("securityNote:");
+  });
+
+  it("reports a revoked freeze authority as none", async () => {
+    const provider = solanaProvider({
+      success: true,
+      data: { freezeable: false, freezeAuthority: null },
+    });
+
+    const result = await searchBirdeyeTokens(
+      {} as IAgentRuntime,
+      { query: SOLANA_MINT },
+      provider as BirdeyeTokenSearchProvider,
+    );
+
+    const line = securityLine(result.text);
+    expect(line).toContain('"ok",false,"none"');
+    expect(line).toContain('"unknown"');
+  });
+
+  it("marks an empty security response as no_data with every check unknown", async () => {
+    const provider = solanaProvider({ success: false, data: {} });
+
+    const result = await searchBirdeyeTokens(
+      {} as IAgentRuntime,
+      { query: SOLANA_MINT },
+      provider as BirdeyeTokenSearchProvider,
+    );
+
+    const values = securityLine(result.text)
+      .replace(/^\s+- /, "")
+      .split(",");
+    expect(values[1]).toBe('"no_data"');
+    expect(values.slice(2).every((value) => value === '"unknown"')).toBe(true);
+  });
+
+  it("propagates a security endpoint failure instead of rendering a pass", async () => {
+    const provider = solanaProvider(undefined);
+    provider.fetchTokenSecurityByAddress.mockRejectedValueOnce(
+      new Error("Birdeye 429"),
+    );
+
+    await expect(
+      searchBirdeyeTokens(
+        {} as IAgentRuntime,
+        { query: SOLANA_MINT },
+        provider as BirdeyeTokenSearchProvider,
+      ),
+    ).rejects.toThrow("Birdeye 429");
   });
 });

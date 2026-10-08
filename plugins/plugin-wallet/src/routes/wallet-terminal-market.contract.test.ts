@@ -1,8 +1,8 @@
 /**
  * Drives the real terminal market and price-history routes with recorded and
  * adversarial CoinGecko payloads through an injected fetch. Deterministic and
- * keyless; it covers validation, stale-cache recovery, upstream 404s, and
- * concurrent-miss sharing.
+ * keyless; it covers validation, the CoinPaprika backup, stale-cache recovery,
+ * upstream 404s, and concurrent-miss sharing.
  */
 import { readFileSync } from "node:fs";
 import type http from "node:http";
@@ -97,6 +97,23 @@ afterEach(() => {
   __resetWalletTerminalMarketRouteForTests();
 });
 
+function paprikaTicker(
+  id: string,
+  symbol: string,
+  name: string,
+  rank: number,
+  price: number,
+  change: number,
+) {
+  return {
+    id,
+    symbol,
+    name,
+    rank,
+    quotes: { USD: { price, percent_change_24h: change } },
+  };
+}
+
 describe("GET /api/wallet/terminal/markets", () => {
   it("lists every usable CoinGecko row as a live source", async () => {
     installFetch(() => jsonResponse(recorded.coinGeckoMarkets));
@@ -136,8 +153,43 @@ describe("GET /api/wallet/terminal/markets", () => {
     const body = res.json<WalletTerminalMarketsResponse>();
     expect(body.stale).toBe(true);
     expect(body.source.stale).toBe(true);
-    expect(body.source.error).toBe("CoinGecko responded 500");
+    expect(body.source.error).toBe(
+      "CoinGecko responded 500; backup: CoinPaprika responded 500",
+    );
     expect(body.markets.length).toBeGreaterThan(0);
+  });
+
+  it("lists CoinPaprika's ranked rows when CoinGecko is down", async () => {
+    const calls = installFetch((href) =>
+      href.includes("coinpaprika")
+        ? jsonResponse([
+            paprikaTicker("eth-ethereum", "ETH", "Ethereum", 2, 2500, -1.2),
+            paprikaTicker("btc-bitcoin", "btc", "Bitcoin", 1, 64000, 2.5),
+            paprikaTicker("dead-coin", "DEAD", "Dead", 0, 1, 0),
+            { id: "broken" },
+          ])
+        : jsonResponse({ status: "down" }, 503),
+    );
+    const { res } = await call("/api/wallet/terminal/markets");
+    expect(res.statusCode).toBe(200);
+    const body = res.json<WalletTerminalMarketsResponse>();
+    expect(body.stale).toBe(false);
+    expect(body.source).toMatchObject({
+      providerId: "coinpaprika",
+      providerName: "CoinPaprika (backup)",
+      available: true,
+    });
+    expect(body.markets.map((market) => market.id)).toEqual([
+      "btc-bitcoin",
+      "eth-ethereum",
+    ]);
+    expect(body.markets[0]).toMatchObject({
+      symbol: "BTC",
+      priceUsd: 64000,
+      change24hPct: 2.5,
+      marketCapRank: 1,
+    });
+    expect(calls[1]).toBe("https://api.coinpaprika.com/v1/tickers?quotes=USD");
   });
 
   it("shares one upstream request across concurrent misses", async () => {
@@ -185,6 +237,58 @@ describe("GET /api/wallet/terminal/chart", () => {
     expect(res.statusCode).toBe(400);
     expect(res.json<{ error: string }>().error).toMatch(message);
     expect(calls).toHaveLength(0);
+  });
+
+  it("charts a CoinPaprika id from the backup list through CoinPaprika", async () => {
+    const calls = installFetch((href) =>
+      href.includes("coinpaprika")
+        ? jsonResponse([
+            { timestamp: "2026-10-07T02:00:00Z", price: 64100 },
+            { timestamp: "2026-10-07T01:00:00Z", price: 64000 },
+          ])
+        : jsonResponse({ error: "coin not found" }, 404),
+    );
+    const { res } = await call(
+      "/api/wallet/terminal/chart?id=btc-bitcoin&days=7",
+    );
+    expect(res.statusCode).toBe(200);
+    const body = res.json<WalletTerminalChartResponse>();
+    expect(body.source.providerId).toBe("coinpaprika");
+    expect(body.points.map((point) => point.priceUsd)).toEqual([64000, 64100]);
+    expect(calls[1]).toContain("/v1/tickers/btc-bitcoin/historical");
+    expect(calls[1]).toContain("interval=1h");
+  });
+
+  it("finds a CoinGecko id on CoinPaprika when CoinGecko is down", async () => {
+    const calls = installFetch((href) => {
+      if (href.includes("/v1/search")) {
+        return jsonResponse({ currencies: [{ id: "sol-solana" }] });
+      }
+      if (href.includes("coinpaprika")) {
+        return jsonResponse([
+          { timestamp: "2026-10-06T00:00:00Z", price: 150 },
+          { timestamp: "2026-10-07T00:00:00Z", price: 155 },
+        ]);
+      }
+      return jsonResponse({}, 500);
+    });
+    const { res } = await call("/api/wallet/terminal/chart?id=solana&days=90");
+    expect(res.statusCode).toBe(200);
+    expect(calls[1]).toContain("/v1/search?q=solana&c=currencies");
+    expect(calls[2]).toContain("/v1/tickers/sol-solana/historical");
+    expect(calls[2]).toContain("interval=1d");
+  });
+
+  it("answers 404 when neither provider knows the asset", async () => {
+    installFetch((href) =>
+      href.includes("/v1/search")
+        ? jsonResponse({ currencies: [] })
+        : jsonResponse({ error: "coin not found" }, 404),
+    );
+    const { res } = await call(
+      "/api/wallet/terminal/chart?id=no-such-coin&days=1",
+    );
+    expect(res.statusCode).toBe(404);
   });
 
   it("maps an unknown CoinGecko asset to 404", async () => {

@@ -323,17 +323,19 @@ function ScoutPanel({
         <ul className="flex flex-wrap gap-2">
           {picks.map((market) => (
             <li key={market.id}>
-              <button
+              <Button
                 type="button"
+                variant="outlineMuted"
+                size="sm"
                 onClick={() => onOpen(market.id)}
-                className="rounded-md border border-border/70 bg-bg px-2.5 py-1.5 text-left text-xs hover:bg-bg-hover"
+                className="h-auto px-2.5 py-1.5 text-left text-xs"
                 data-testid={`terminal-scout-${market.id}`}
               >
                 <span className="font-medium text-txt">{market.symbol}</span>{" "}
                 <span className={changeTone(market.change24hPct)}>
                   {formatTerminalChange(market.change24hPct)}
                 </span>
-              </button>
+              </Button>
             </li>
           ))}
         </ul>
@@ -662,10 +664,11 @@ function MarketList({
             const watched = watchlist.has(market.id);
             return (
               <li key={market.id} className="flex items-center gap-2 pr-2">
-                <button
+                <Button
                   type="button"
+                  variant="searchResult"
                   onClick={() => onOpen(market.id)}
-                  className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left hover:bg-bg-hover"
+                  className="h-auto min-w-0 flex-1 justify-start gap-3 whitespace-normal px-3 py-2.5 text-left"
                   data-testid={`terminal-market-row-${market.id}`}
                 >
                   <AssetMark market={market} />
@@ -690,7 +693,7 @@ function MarketList({
                       {formatTerminalChange(market.change24hPct)}
                     </span>
                   </span>
-                </button>
+                </Button>
                 <Button
                   variant="ghost"
                   size="icon-sm"
@@ -1101,14 +1104,15 @@ function AlertList({
             key={alert.id}
             className="flex items-center justify-between gap-3 px-3 py-2 text-sm"
           >
-            <button
+            <Button
               type="button"
-              className="text-left text-txt hover:underline"
+              variant="publicLink"
+              className="text-left text-sm"
               onClick={() => onOpen(alert.assetId)}
             >
               {alert.symbol} {alert.direction === "above" ? "above" : "below"}{" "}
               {formatTerminalUsd(alert.targetUsd)}
-            </button>
+            </Button>
             <span className="flex items-center gap-2">
               <span
                 className={cn(
@@ -1307,11 +1311,12 @@ function PaperPortfolio({
               const market = marketsById.get(position.assetId);
               return (
                 <li key={position.assetId}>
-                  <button
+                  <Button
                     type="button"
+                    variant="searchResult"
                     disabled={!market}
                     onClick={() => onOpen(position.assetId)}
-                    className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left hover:bg-bg-hover disabled:hover:bg-transparent"
+                    className="h-auto w-full justify-between gap-3 whitespace-normal px-3 py-2.5 text-left"
                   >
                     <span>
                       <span className="block text-sm font-medium text-txt">
@@ -1326,7 +1331,7 @@ function PaperPortfolio({
                         ? "Price unavailable"
                         : formatTerminalUsd(position.valueUsd)}
                     </span>
-                  </button>
+                  </Button>
                 </li>
               );
             })}

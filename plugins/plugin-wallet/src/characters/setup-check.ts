@@ -3,17 +3,31 @@
  * this machine: the character file, local Ollama inference through
  * `@elizaos/plugin-zerollama`, Solana access through `@elizaos/plugin-wallet`,
  * and storage through `@elizaos/plugin-sql`. It reads only the given
- * environment and makes read-only calls (Ollama's model list, Solana
- * `getHealth` / `getBalance`, and one LunarCrush lookup when a key is set); it
- * never prints a key. `check-setup.ts` is the
- * command-line entry.
+ * environment and verifies every connection with read-only calls: Ollama's
+ * model list, Solana `getHealth` / `getBalance`, the CoinGecko and CoinPaprika
+ * market feeds, DexScreener and GoPlus for token checks, each Jito block
+ * engine's tip accounts, a Kraken or OKX balance read when its keys are set,
+ * and one LunarCrush lookup when a key is set. It never places an order and
+ * never prints a key. `check-setup.ts` is the command-line entry.
  */
 import { Keypair } from "@solana/web3.js";
 import bs58 from "bs58";
+import { DEXSCREENER_TOKEN_PAIRS_URL } from "../analytics/dexscreener/pairs.js";
+import { GOPLUS_SOLANA_URL } from "../analytics/goplus/solana-token-security.js";
 import {
   fetchLunarCrushSocialSignal,
   LunarCrushError,
 } from "../analytics/lunarcrush/social-signal.js";
+import {
+  EXCHANGE_VENUE_SETTINGS,
+  ExchangeVenueError,
+  exchangeClient,
+  type VenueRuntime,
+} from "../api/exchange-venues.js";
+import { resolveJitoRoute } from "../api/terminal-trade.js";
+import type { WalletExchangeVenue } from "../contracts.js";
+import { COINPAPRIKA_API_BASE } from "../routes/coinpaprika-backup.js";
+import { COINGECKO_API_BASE } from "../routes/wallet-terminal-market-route.js";
 
 export type SetupCheckStatus = "pass" | "warn" | "fail";
 
@@ -416,6 +430,267 @@ async function checkSolana(
   return checks;
 }
 
+/** Wrapped SOL: a mint every Solana data provider knows. */
+const PROBE_MINT = "So11111111111111111111111111111111111111112";
+
+type Probe = { ok: true } | { ok: false; reason: string };
+
+/**
+ * One read-only request; `accepts` decides whether the JSON answer is the
+ * provider's real reply rather than an error page or a stub.
+ */
+async function probe(
+  deps: SetupCheckDeps,
+  url: string,
+  accepts: (body: unknown) => boolean,
+  init: RequestInit = {},
+): Promise<Probe> {
+  try {
+    const response = await deps.fetch(url, {
+      ...init,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) return { ok: false, reason: `HTTP ${response.status}` };
+    const body: unknown = await response.json();
+    return accepts(body)
+      ? { ok: true }
+      : { ok: false, reason: "the reply is not what it should be" };
+  } catch (error) {
+    // error-policy:J4 an unreachable provider becomes a check line the person can act on.
+    return { ok: false, reason: describeFailure(error) };
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Markets read CoinGecko first and fall back to CoinPaprika. */
+async function checkMarketData(deps: SetupCheckDeps): Promise<SetupCheck> {
+  const area = "@elizaos/plugin-wallet";
+  const name = "Market prices";
+  const [primary, backup] = await Promise.all([
+    probe(
+      deps,
+      `${COINGECKO_API_BASE}/ping`,
+      (body) => isRecord(body) && typeof body.gecko_says === "string",
+    ),
+    probe(
+      deps,
+      `${COINPAPRIKA_API_BASE}/global`,
+      (body) => isRecord(body) && typeof body.market_cap_usd === "number",
+    ),
+  ]);
+  if (primary.ok && backup.ok) {
+    return {
+      area,
+      name,
+      status: "pass",
+      detail: "CoinGecko answers, and the CoinPaprika backup answers too.",
+    };
+  }
+  if (primary.ok && !backup.ok) {
+    return {
+      area,
+      name,
+      status: "warn",
+      detail: `CoinGecko answers, but the CoinPaprika backup did not (${backup.reason}).`,
+    };
+  }
+  if (!primary.ok && backup.ok) {
+    return {
+      area,
+      name,
+      status: "warn",
+      detail: `CoinGecko did not answer (${primary.reason}); Markets will use the CoinPaprika backup.`,
+    };
+  }
+  return {
+    area,
+    name,
+    status: "fail",
+    detail: `Neither CoinGecko (${primary.ok ? "" : primary.reason}) nor CoinPaprika (${backup.ok ? "" : backup.reason}) answered, so Markets and charts are empty.`,
+  };
+}
+
+/** Token checks before a trade: GoPlus safety and DexScreener liquidity. */
+async function checkTokenData(deps: SetupCheckDeps): Promise<SetupCheck[]> {
+  const area = "@elizaos/plugin-wallet";
+  const goplusUrl = new URL(GOPLUS_SOLANA_URL);
+  goplusUrl.searchParams.set("contract_addresses", PROBE_MINT);
+  const [goplus, dexscreener] = await Promise.all([
+    probe(
+      deps,
+      goplusUrl.toString(),
+      (body) => isRecord(body) && body.code === 1,
+    ),
+    probe(deps, `${DEXSCREENER_TOKEN_PAIRS_URL}/${PROBE_MINT}`, (body) =>
+      Array.isArray(body),
+    ),
+  ]);
+  return [
+    goplus.ok
+      ? {
+          area,
+          name: "GoPlus token safety",
+          status: "pass",
+          detail: "GoPlus answers token_safety lookups.",
+        }
+      : {
+          area,
+          name: "GoPlus token safety",
+          status: "fail",
+          detail: `GoPlus did not answer (${goplus.reason}), so token_safety can't check a mint before a trade.`,
+        },
+    dexscreener.ok
+      ? {
+          area,
+          name: "DexScreener liquidity",
+          status: "pass",
+          detail: "DexScreener answers token_pairs lookups.",
+        }
+      : {
+          area,
+          name: "DexScreener liquidity",
+          status: "fail",
+          detail: `DexScreener did not answer (${dexscreener.reason}), so token_pairs can't show liquidity or pool age.`,
+        },
+  ];
+}
+
+/**
+ * Asks each Jito block engine, the reviewed one and its backup regions, for
+ * its tip accounts: a read-only call every engine serves.
+ */
+async function checkJito(
+  env: SetupEnv,
+  deps: SetupCheckDeps,
+): Promise<SetupCheck> {
+  const area = "@elizaos/plugin-wallet";
+  const name = "Jito block engines";
+  let route: { blockEngineUrl: string; backupBlockEngineUrls: string[] };
+  try {
+    route = resolveJitoRoute({ getSetting: (key) => setting(env, key) });
+  } catch (error) {
+    // error-policy:J3 an unusable Jito setting is reported as a failed check.
+    return { area, name, status: "fail", detail: describeFailure(error) };
+  }
+  const engines = [route.blockEngineUrl, ...route.backupBlockEngineUrls];
+  const results = await Promise.all(
+    engines.map((url) =>
+      probe(
+        deps,
+        `${url}/api/v1/getTipAccounts`,
+        (body) => isRecord(body) && Array.isArray(body.result),
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "getTipAccounts",
+            params: [],
+          }),
+        },
+      ),
+    ),
+  );
+  const down = engines.flatMap((url, index) => {
+    const result = results[index];
+    return result && !result.ok
+      ? [`${new URL(url).host} (${result.reason})`]
+      : [];
+  });
+  const answering = engines.length - down.length;
+  const downText = down.length > 0 ? ` Not answering: ${down.join(", ")}.` : "";
+  if (results[0]?.ok) {
+    return {
+      area,
+      name,
+      status: "pass",
+      detail: `${new URL(route.blockEngineUrl).host} answers, with ${answering - 1} of ${engines.length - 1} backup regions answering.${downText}`,
+    };
+  }
+  return {
+    area,
+    name,
+    status: "warn",
+    detail:
+      answering > 0
+        ? `The first block engine is down; Jito sends will use a backup region.${downText}`
+        : `No Jito block engine answered, so the Jito route will fail; the RPC route still works.${downText}`,
+  };
+}
+
+const VENUE_NAMES: Record<WalletExchangeVenue, string> = {
+  kraken: "Kraken",
+  okx: "OKX",
+};
+/** A currency each venue reports a balance for, used only to prove the key works. */
+const VENUE_PROBE_CURRENCY: Record<WalletExchangeVenue, string> = {
+  kraken: "USD",
+  okx: "USDT",
+};
+
+/**
+ * Exchange orders are optional. With every key for a venue set, one balance
+ * read shows whether the venue accepts the key; nothing is ordered.
+ */
+async function checkExchange(
+  env: SetupEnv,
+  deps: SetupCheckDeps,
+  venue: WalletExchangeVenue,
+): Promise<SetupCheck> {
+  const area = "@elizaos/plugin-wallet";
+  const venueName = VENUE_NAMES[venue];
+  const name = `${venueName} orders`;
+  const keys = EXCHANGE_VENUE_SETTINGS[venue];
+  const missing = keys.filter((key) => setting(env, key) === null);
+  if (missing.length === keys.length) {
+    return {
+      area,
+      name,
+      status: "warn",
+      detail: `${keys.join(", ")} not set, so ${venueName} limit orders are off. Optional.`,
+    };
+  }
+  if (missing.length > 0) {
+    return {
+      area,
+      name,
+      status: "fail",
+      detail: `${missing.join(", ")} not set; ${venueName} needs all of ${keys.join(", ")}.`,
+    };
+  }
+  const runtime: VenueRuntime = {
+    getSetting: (key) => setting(env, key),
+    fetch: (input, init) => deps.fetch(String(input), init),
+  };
+  try {
+    await exchangeClient(runtime, venue).availableBalance(
+      VENUE_PROBE_CURRENCY[venue],
+    );
+    return {
+      area,
+      name,
+      status: "pass",
+      detail: `${venueName} accepted the key on a read-only balance check.`,
+    };
+  } catch (error) {
+    // error-policy:J1 setup-check boundary: the failure becomes a check line.
+    const refused =
+      error instanceof ExchangeVenueError && error.kind === "refused";
+    return {
+      area,
+      name,
+      status: refused ? "fail" : "warn",
+      detail: refused
+        ? `${venueName} refused the key (${describeFailure(error)}). Check that it can read balances and trade.`
+        : describeFailure(error),
+    };
+  }
+}
+
 function checkStorage(env: SetupEnv): SetupCheck {
   const area = "@elizaos/plugin-sql";
   if (setting(env, "POSTGRES_URL")) {
@@ -496,6 +771,11 @@ export async function checkCryptoQueenSetup(
     checkCharacter(env, deps),
     ...(await checkOllama(env, deps)),
     ...(await checkSolana(env, deps)),
+    await checkMarketData(deps),
+    ...(await checkTokenData(deps)),
+    await checkJito(env, deps),
+    await checkExchange(env, deps, "kraken"),
+    await checkExchange(env, deps, "okx"),
     await checkSocialSignal(env, deps),
     checkStorage(env),
   ];

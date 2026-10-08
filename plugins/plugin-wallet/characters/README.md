@@ -52,10 +52,13 @@ through `@elizaos/plugin-zerollama`, so no cloud API key is needed.
 
    Never commit the filled-in `packages/agent/.env`; it holds your wallet key.
 
-4. Check the setup. This reads the same file, asks Ollama which models are
-   pulled, asks the Solana RPC for its health and the wallet's balance, and
-   prints PASS, WARN or FAIL per plugin with the step that fixes each failure.
-   It never prints the key.
+4. Check the setup. This reads the same file and verifies every connection
+   with read-only calls: which models Ollama has pulled, the Solana RPC's
+   health and the wallet's balance, CoinGecko and its CoinPaprika backup,
+   GoPlus and DexScreener, each Jito block engine region, a Kraken or OKX
+   balance read when those keys are set, and LunarCrush when its key is set.
+   It prints PASS, WARN or FAIL for each with the step that fixes each
+   failure. It never places an order and never prints a key.
 
    ```bash
    bun run --cwd plugins/plugin-wallet check:crypto-queen

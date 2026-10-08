@@ -17,7 +17,7 @@ import type {
   WalletTokenPairsSource,
 } from "../../contracts.js";
 
-const DEXSCREENER_TOKEN_PAIRS_URL =
+export const DEXSCREENER_TOKEN_PAIRS_URL =
   "https://api.dexscreener.com/token-pairs/v1/solana";
 const FETCH_TIMEOUT_MS = 10_000;
 
