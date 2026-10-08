@@ -56,6 +56,8 @@ function providerLabel(
       });
     case "openai-api":
       return t("accounts.provider.openaiApi", { defaultValue: "OpenAI API" });
+    case "gemini-api":
+      return t("accounts.provider.geminiApi", { defaultValue: "Gemini API" });
     case "deepseek-api":
       return t("accounts.provider.deepseekApi", {
         defaultValue: "DeepSeek API",

@@ -56,6 +56,7 @@ export const LINKED_ACCOUNT_PROVIDER_IDS = [
 	"deepseek-coding",
 	"anthropic-api",
 	"openai-api",
+	"gemini-api",
 	"deepseek-api",
 	"zai-api",
 	"moonshot-api",

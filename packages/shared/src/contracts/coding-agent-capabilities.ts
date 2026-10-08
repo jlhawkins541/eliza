@@ -255,6 +255,16 @@ export const CODING_PROVIDER_DESCRIPTORS = {
     null,
     "OpenAI API keys can serve model inference, but the coding-account bridge only supports Codex subscription accounts today.",
   ),
+  "gemini-api": descriptor(
+    "gemini-api",
+    "api-key",
+    "direct-api-key",
+    "usage",
+    true,
+    true,
+    null,
+    "Gemini API keys can serve model inference, but no supported coding-agent spawn backend consumes them.",
+  ),
   "deepseek-api": descriptor(
     "deepseek-api",
     "api-key",
