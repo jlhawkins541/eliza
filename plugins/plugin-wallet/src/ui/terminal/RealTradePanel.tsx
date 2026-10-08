@@ -702,15 +702,11 @@ function TradeTicket({
 }
 
 function PhantomSection({
-  trading,
   status,
   wallet,
-  initialMint,
 }: {
-  trading: RealTradingHandle;
   status: WalletTerminalTradeStatusResponse;
   wallet: BrowserWalletHandle;
-  initialMint: string | null;
 }) {
   const { state } = wallet;
   if (!status.browserWalletEnabled) {
@@ -755,40 +751,28 @@ function PhantomSection({
     );
   }
   return (
-    <>
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-xs text-muted" data-testid="phantom-account">
-          Phantom {shortAddress(state.address)}
-        </p>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={wallet.disconnect}
-          data-testid="phantom-disconnect"
-        >
-          Disconnect
-        </Button>
-      </div>
-      <TradeTicket
-        key={state.address}
-        trading={trading}
-        status={status}
-        initialMint={initialMint}
-        signer={{ kind: "browser-wallet", address: state.address }}
-        browserWallet={wallet}
-      />
-    </>
+    <div className="flex items-center justify-between gap-2">
+      <p className="text-xs text-muted" data-testid="phantom-account">
+        Phantom {shortAddress(state.address)}
+      </p>
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={wallet.disconnect}
+        data-testid="phantom-disconnect"
+      >
+        Disconnect
+      </Button>
+    </div>
   );
 }
 
 function AgentWalletSection({
   trading,
   status,
-  initialMint,
 }: {
   trading: RealTradingHandle;
   status: WalletTerminalTradeStatusResponse;
-  initialMint: string | null;
 }) {
   return (
     <>
@@ -805,17 +789,25 @@ function AgentWalletSection({
         </p>
       ) : !status.realTradingEnabled ? (
         <EnableRealTrading trading={trading} />
-      ) : (
-        <TradeTicket
-          trading={trading}
-          status={status}
-          initialMint={initialMint}
-          signer={{ kind: "agent-wallet" }}
-          browserWallet={null}
-        />
-      )}
+      ) : null}
     </>
   );
+}
+
+/** The signer a ticket may trade with right now, or null while its section still gates it. */
+function readySigner(
+  choice: SignerChoice,
+  status: WalletTerminalTradeStatusResponse,
+  phantom: BrowserWalletHandle,
+): WalletTerminalTradeSigner | null {
+  if (choice === "phantom") {
+    return status.browserWalletEnabled && phantom.state.status === "connected"
+      ? { kind: "browser-wallet", address: phantom.state.address }
+      : null;
+  }
+  return status.wallet.canSign && status.realTradingEnabled
+    ? { kind: "agent-wallet" }
+    : null;
 }
 
 export function RealTradePanel({
@@ -830,6 +822,10 @@ export function RealTradePanel({
   const [signerChoice, setSignerChoice] = useState<SignerChoice>(() =>
     findPhantom() ? "phantom" : "agent",
   );
+  const signer =
+    state.status === "ready"
+      ? readySigner(signerChoice, state.data, phantom)
+      : null;
 
   return (
     <div className="flex flex-col gap-4">
@@ -869,19 +865,25 @@ export function RealTradePanel({
             />
           </div>
           {signerChoice === "phantom" ? (
-            <PhantomSection
-              trading={trading}
-              status={state.data}
-              wallet={phantom}
-              initialMint={initialMint}
-            />
+            <PhantomSection status={state.data} wallet={phantom} />
           ) : (
-            <AgentWalletSection
+            <AgentWalletSection trading={trading} status={state.data} />
+          )}
+          {signer ? (
+            // One ticket for both signers; the key resets it when the signer changes.
+            <TradeTicket
+              key={
+                signer.kind === "browser-wallet"
+                  ? `browser-wallet:${signer.address}`
+                  : "agent-wallet"
+              }
               trading={trading}
               status={state.data}
               initialMint={initialMint}
+              signer={signer}
+              browserWallet={signer.kind === "browser-wallet" ? phantom : null}
             />
-          )}
+          ) : null}
           {state.data.realTradingEnabled ? <ExchangeOrderPanel /> : null}
         </>
       )}
