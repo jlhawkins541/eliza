@@ -9,6 +9,9 @@
 import { registerAppRoutePluginLoader } from "@elizaos/core";
 import { registerAppShellPage } from "@elizaos/ui/app-shell-registry";
 import { registerBuiltinWidgets } from "@elizaos/ui/widgets";
+// Keep route/widget metadata eager, but load the wallet views only when the
+// user opens /crypto or /inventory. Both views reach the inventory dashboard
+// through an `Escape` hatch, the spatial fallback.
 import { walletAppPlugin } from "./plugin.ts";
 import { WALLET_STATUS_WIDGET } from "./widgets/wallet-status.helpers.ts";
 
@@ -23,11 +26,11 @@ registerAppShellPage({
   pluginId: "app-wallet",
   label: "Crypto Terminal",
   viewKind: "system",
-  icon: "ChartCandlestick",
+  icon: "TrendingUp",
   path: "/crypto",
-  tabAffinity: "crypto",
+  tabAffinity: "inventory",
   group: "wallet",
-  order: 45,
+  order: 60,
   surface: {
     background: "opaque",
     capabilities: [],

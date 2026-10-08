@@ -1,11 +1,20 @@
 /**
- * Exercises provider switching through the real live-stack account and runtime
- * routes. The test creates its own linked account because process-level API-key
- * credentials intentionally do not appear as user-managed account rows.
+ * Exercises provider switching. The live-stack round-trip drives the real
+ * account and runtime routes and creates its own linked account, because
+ * process-level API-key credentials intentionally do not appear as
+ * user-managed account rows. The `/models` case runs in the real renderer
+ * against the deterministic model-settings fixtures: it picks a provider tile
+ * and both models, confirms, and asserts the activation request body and the
+ * restart progress the page shows while the operation applies.
  */
 
 import { expect, type Page, test } from "@playwright/test";
-import { openAppPath, openSettingsSection, seedAppStorage } from "./helpers";
+import {
+  installDefaultAppRoutes,
+  openAppPath,
+  openSettingsSection,
+  seedAppStorage,
+} from "./helpers";
 
 const LIVE_STACK = process.env.ELIZA_UI_SMOKE_LIVE_STACK === "1";
 
@@ -130,5 +139,182 @@ test.describe("provider config deep round-trip", () => {
       `/api/accounts/${TEST_PROVIDER_ID}/${String(created.id)}`,
       "DELETE",
     );
+  });
+});
+
+const MODELS_OPERATION_ID = "op-models-page-e2e";
+const SMOKE_UNCHECKED = { state: "unchecked", checkedAt: null, detail: null };
+
+function anthropicReadyStatus(operation: unknown) {
+  const openAiEndpoint = {
+    url: "https://api.openai.com/v1",
+    isDefault: true,
+    transport: "https",
+    overriddenBy: null,
+  };
+  const keyed = (last4: string) => ({
+    state: "stored",
+    last4,
+    source: "account-pool",
+    lastVerifiedAt: null,
+    health: SMOKE_UNCHECKED,
+  });
+  const tile = (
+    id: string,
+    label: string,
+    credential: unknown,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    id,
+    label,
+    pluginInstalled: true,
+    credential,
+    endpoint: null,
+    supportsEndpoint: false,
+    activatable: true,
+    requiresModelSelection: false,
+    ...extra,
+  });
+  return {
+    active: {
+      provider: "openai",
+      providerLabel: "OpenAI",
+      runtimeProviderName: "openai",
+      smallModel: "gpt-5.6-luna",
+      largeModel: "gpt-5.6-sol",
+      smallModelSource: "user",
+      largeModelSource: "user",
+      endpoint: openAiEndpoint,
+      health: SMOKE_UNCHECKED,
+    },
+    providers: [
+      tile("openai", "OpenAI", keyed("smk1"), {
+        endpoint: openAiEndpoint,
+        supportsEndpoint: true,
+      }),
+      tile("anthropic", "Anthropic", keyed("ant2")),
+      tile(
+        "grok",
+        "xAI Grok",
+        { state: "missing" },
+        {
+          requiresModelSelection: true,
+        },
+      ),
+      tile("ollama", "Ollama", { state: "not-required" }),
+      tile("elizacloud", "Eliza Cloud", { state: "missing" }),
+      tile(
+        "local",
+        "On-device",
+        { state: "not-required" },
+        {
+          activatable: false,
+        },
+      ),
+    ],
+    operation,
+    managedByCloud: false,
+  };
+}
+
+test.describe("Models page provider switch", () => {
+  test("switching to Anthropic from /models posts the chosen models and shows restart progress", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await seedAppStorage(page);
+    await installDefaultAppRoutes(page);
+
+    // Registered after the defaults, so these handlers take precedence.
+    const activations: unknown[] = [];
+    await page.route("**/api/model-settings", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.fallback();
+        return;
+      }
+      const operation =
+        activations.length > 0
+          ? {
+              id: MODELS_OPERATION_ID,
+              provider: "anthropic",
+              state: "applying",
+              error: null,
+            }
+          : null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(anthropicReadyStatus(operation)),
+      });
+    });
+    await page.route(
+      "**/api/model-settings/providers/anthropic/models",
+      async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            provider: "anthropic",
+            state: "ok",
+            models: [
+              { id: "claude-haiku-4-5", label: "Claude Haiku 4.5" },
+              { id: "claude-opus-4-8", label: "Claude Opus 4.8" },
+            ],
+            fetchedAt: "2026-10-07T00:00:00.000Z",
+          }),
+        });
+      },
+    );
+    await page.route("**/api/model-settings/activate", async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.fallback();
+        return;
+      }
+      activations.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({
+          operationId: MODELS_OPERATION_ID,
+          provider: "anthropic",
+          deduped: false,
+        }),
+      });
+    });
+
+    await openAppPath(page, "/models");
+    await expect(page.getByTestId("models-active-card")).toBeVisible({
+      timeout: 30_000,
+    });
+
+    await page.getByTestId("models-provider-anthropic").click();
+    await expect(page.getByTestId("models-provider-anthropic")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    await page.getByTestId("models-small-select").click();
+    await page.getByRole("option", { name: "Claude Haiku 4.5" }).click();
+    await page.getByTestId("models-large-select").click();
+    await page.getByRole("option", { name: "Claude Opus 4.8" }).click();
+
+    const activate = page.getByTestId("models-activate");
+    await expect(activate).toHaveText(/Switch Eliza to Anthropic/);
+    await expect(activate).toBeEnabled();
+    await activate.click();
+
+    const confirm = page.getByRole("dialog");
+    await expect(confirm).toContainText("Anthropic");
+    await confirm.getByRole("button", { name: "Switch and restart" }).click();
+
+    await expect.poll(() => activations.length).toBe(1);
+    expect(activations[0]).toEqual({
+      provider: "anthropic",
+      smallModel: "claude-haiku-4-5",
+      largeModel: "claude-opus-4-8",
+    });
+    await expect(page.getByTestId("models-operation-progress")).toBeVisible({
+      timeout: 15_000,
+    });
   });
 });

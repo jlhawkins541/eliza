@@ -3,8 +3,8 @@
  * runtime config first then `process.env`, and the typed getters here resolve
  * every model slot, base URL, auth header, embedding dimension, and timeout with
  * their documented fallback chains. Also home to provider-mode detection
- * (Cerebras / EvoLink / proxy) and the browser-vs-node branch that decides
- * whether an `Authorization` header is sent.
+ * (Cerebras / EvoLink / xAI / proxy) and the browser-vs-node branch that
+ * decides whether an `Authorization` header is sent.
  */
 import type { IAgentRuntime } from "@elizaos/core";
 import { DEFAULT_CEREBRAS_TEXT_MODEL, logger } from "@elizaos/core";
@@ -105,6 +105,26 @@ export function isCerebrasMode(runtime: IAgentRuntime): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * True when `baseURL` addresses xAI's OpenAI-compatible API (`x.ai` or a
+ * subdomain such as `api.x.ai`). The account pool exports the active Grok key
+ * through this plugin with that base URL.
+ */
+const XAI_BASE_URL = /^https?:\/\/(?:[^/?#@]*@)?(?:[a-z0-9-]+\.)*x\.ai(?::\d+)?(?:[/?#]|$)/i;
+
+export function isXaiBaseURL(baseURL: string): boolean {
+  return XAI_BASE_URL.test(baseURL.trim());
+}
+
+/**
+ * True when the resolved text endpoint is xAI. xAI serves only its own model
+ * ids, so capabilities whose default model id is OpenAI-only must not be
+ * registered against it without an explicit per-capability override.
+ */
+export function isXaiMode(runtime: IAgentRuntime): boolean {
+  return isXaiBaseURL(getBaseURL(runtime));
 }
 
 /**

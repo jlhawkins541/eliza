@@ -19,6 +19,12 @@
  * registry — asserted against a loopback HTTP stub standing in for the
  * agent server the section routes call.
  *
+ * The Models-page providers switch through the shared ModelSettingsService
+ * activation (credential, model-tier, and operation-manager paths covered
+ * here). xAI Grok, which has no default models, always takes that activation:
+ * a chat-supplied key or legacy model slots for it are refused before the
+ * store is touched.
+ *
  * Deterministic: real config store on a temp dir, stub runtime, no live model.
  */
 import fs from "node:fs";
@@ -42,6 +48,8 @@ import {
   resolveDevCloudEnvAuthority,
 } from "@elizaos/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { registerModelSettingsHost } from "../api/model-settings-host.ts";
+import { loadElizaConfig, saveElizaConfig } from "../config/config.ts";
 import { settingsAction } from "./settings-actions.ts";
 
 // A stub runtime is enough for the config-store ops (toggle_capability /
@@ -66,6 +74,15 @@ const AUTHORITY_ENV_KEYS = [
   "ELIZAOS_CLOUD_BASE_URL",
   "ELIZAOS_CLOUD_API_KEY",
   "ELIZAOS_CLOUD_ENABLED",
+  // The Models-page activation reads provider credentials from the account
+  // store under the state dir and from launch env; isolate both.
+  "ELIZA_STATE_DIR",
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "OPENAI_SMALL_MODEL",
+  "OPENAI_LARGE_MODEL",
+  "XAI_API_KEY",
+  "ELIZA_CLOUD_PROVISIONED",
 ] as const;
 const originalAuthorityEnv = Object.fromEntries(
   AUTHORITY_ENV_KEYS.map((key) => [key, process.env[key]]),
@@ -94,6 +111,7 @@ beforeEach(() => {
   // (ELIZA_PERSIST_CONFIG_PATH) at the temp file so load and save agree.
   process.env.ELIZA_CONFIG_PATH = configPath;
   process.env.ELIZA_PERSIST_CONFIG_PATH = configPath;
+  process.env.ELIZA_STATE_DIR = tempDir;
 });
 
 afterEach(() => {
@@ -190,6 +208,7 @@ describe("SETTINGS update_ai_provider — persists to the real config store", ()
   );
 
   it('"switch my model provider to openai" writes provider routing to eliza.json', async () => {
+    process.env.OPENAI_API_KEY = "fixture-openai-launch-key-1234";
     const result = await invoke({
       action: "update_ai_provider",
       provider: "openai",
@@ -198,6 +217,8 @@ describe("SETTINGS update_ai_provider — persists to the real config store", ()
     expect(result.success).toBe(true);
     expect(result.data?.op).toBe("update_ai_provider");
     expect(result.data?.provider).toBe("openai");
+    // No API host is registered in this process, so the shared Models-page
+    // activation persists the change for the next boot.
     expect(result.data?.requiresRestart).toBe(true);
 
     // The write actually landed on disk with the real provider routing the
@@ -224,6 +245,131 @@ describe("SETTINGS update_ai_provider — persists to the real config store", ()
     // switched provider can authenticate on the next boot.
     const raw = fs.readFileSync(configPath, "utf-8");
     expect(raw).toContain("fixture-openai-api-token");
+  });
+
+  it("refuses to switch to a keyed provider with no stored credential", async () => {
+    const before = fs.readFileSync(configPath, "utf-8");
+    const result = await invoke({
+      action: "update_ai_provider",
+      provider: "openai",
+    });
+    expect(result.success).toBe(false);
+    expect(result.data?.error).toBe("CREDENTIAL_REQUIRED");
+    expect(fs.readFileSync(configPath, "utf-8")).toBe(before);
+  });
+
+  it("requires both Grok model tiers before touching the store", async () => {
+    process.env.XAI_API_KEY = "xai-fixture-launch-key-5678";
+    const before = fs.readFileSync(configPath, "utf-8");
+    const result = await invoke({
+      action: "update_ai_provider",
+      provider: "xai",
+      smallModel: "grok-4-fast",
+    });
+    expect(result.success).toBe(false);
+    expect(result.data?.error).toBe("MODEL_REQUIRED");
+    expect(fs.readFileSync(configPath, "utf-8")).toBe(before);
+  });
+
+  it.each([
+    ["an API key", { apiKey: "xai-chat-key-0000" }, "API_KEY_NOT_ACCEPTED"],
+    [
+      "an API key with both tiers",
+      {
+        apiKey: "xai-chat-key-0000",
+        smallModel: "grok-4-fast",
+        largeModel: "grok-4",
+      },
+      "API_KEY_NOT_ACCEPTED",
+    ],
+    [
+      "legacy modelConfigs",
+      { modelConfigs: { small: "grok-4-fast", large: "grok-4" } },
+      "MODEL_SELECTION_UNSUPPORTED",
+    ],
+    ["no model tiers", {}, "MODEL_REQUIRED"],
+  ])(
+    "never saves a Grok route from %s on the legacy path",
+    async (_label, extra, code) => {
+      process.env.XAI_API_KEY = "xai-fixture-launch-key-5678";
+      const before = fs.readFileSync(configPath, "utf-8");
+      const result = await invoke({
+        action: "update_ai_provider",
+        provider: "grok",
+        ...extra,
+      });
+      expect(result.success).toBe(false);
+      expect(result.data?.error).toBe(code);
+      expect(fs.readFileSync(configPath, "utf-8")).toBe(before);
+    },
+  );
+
+  it("rejects model tiers for providers outside the Models page", async () => {
+    const before = fs.readFileSync(configPath, "utf-8");
+    const result = await invoke({
+      action: "update_ai_provider",
+      provider: "groq",
+      smallModel: "openai/gpt-oss-120b",
+    });
+    expect(result.success).toBe(false);
+    expect(result.data?.error).toBe("MODEL_SELECTION_UNSUPPORTED");
+    expect(fs.readFileSync(configPath, "utf-8")).toBe(before);
+  });
+
+  it("runs through the API host's operation manager when one is registered", async () => {
+    process.env.OPENAI_API_KEY = "fixture-openai-launch-key-1234";
+    const config = loadElizaConfig();
+    const started: unknown[] = [];
+    registerModelSettingsHost(() => ({
+      state: { config, runtime: null },
+      saveConfig: saveElizaConfig,
+      operations: {
+        start: async (request) => {
+          started.push(request.intent);
+          await request.prepare?.();
+          return {
+            kind: "accepted",
+            operation: {
+              id: "op-chat-switch",
+              kind: "provider-switch",
+              intent: request.intent,
+              tier: "cold",
+              status: "pending",
+              phases: [],
+              startedAt: Date.now(),
+            },
+          };
+        },
+        get: async () => null,
+        list: async () => [],
+        findActive: async () => null,
+      },
+    }));
+    try {
+      const result = await invoke({
+        action: "update_ai_provider",
+        provider: "openai",
+      });
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject({
+        provider: "openai",
+        operationId: "op-chat-switch",
+        requiresRestart: false,
+      });
+      expect(started).toEqual([
+        {
+          kind: "provider-switch",
+          provider: "openai",
+          modelSelection: { smallModel: null, largeModel: null },
+        },
+      ]);
+      const routing = readConfig().serviceRouting as
+        | { llmText?: { backend?: string } }
+        | undefined;
+      expect(routing?.llmText?.backend).toBe("openai");
+    } finally {
+      registerModelSettingsHost(null);
+    }
   });
 
   it("rejects a missing provider without touching the store", async () => {

@@ -34,6 +34,13 @@ export interface ProviderSwitchIntent {
    */
   apiKeyRef?: string;
   primaryModel?: string;
+  /**
+   * Small/large model ids chosen on the Models page (null = the provider's
+   * default). Present only for model-settings activations. The selection
+   * reaches provider plugins through the boot-time env projection, so these
+   * operations always run a full restart.
+   */
+  modelSelection?: { smallModel: string | null; largeModel: string | null };
 }
 
 export interface ConfigReloadIntent {

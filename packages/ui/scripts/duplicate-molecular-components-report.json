@@ -1,7 +1,7 @@
 {
   "schemaVersion": 3,
   "sourceAtomicSchemaVersion": 1,
-  "scannedFiles": 911,
+  "scannedFiles": 915,
   "canonicalContracts": [
     {
       "id": "auth-result-shell",
@@ -84,7 +84,7 @@
       ],
       "minimumMaintainedReferences": 10,
       "responsibility": "Label, description, control, and navigation alignment for settings.",
-      "maintainedReferences": 42
+      "maintainedReferences": 43
     },
     {
       "id": "action-list-row",
@@ -108,7 +108,7 @@
       "maintainedReferences": 2
     }
   ],
-  "eligibleComponents": 103,
+  "eligibleComponents": 104,
   "clusters": [
     {
       "archetype": "row",

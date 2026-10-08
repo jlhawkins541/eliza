@@ -44,6 +44,7 @@ import {
   handleMiscRoutes,
   handleMobileOptionalRoutes,
   handleModelConfigRoutes,
+  handleModelSettingsRoutes,
   handleModelsRoutes,
   handlePermissionRoutes,
   handlePermissionsExtraRoutes,
@@ -318,6 +319,7 @@ describe("lazy handle* path guards", () => {
       handle: handlePermissionsExtraRoutes,
     },
     { name: "handleProviderSwitchRoutes", handle: handleProviderSwitchRoutes },
+    { name: "handleModelSettingsRoutes", handle: handleModelSettingsRoutes },
     { name: "handleRegistryRoutes", handle: handleRegistryRoutes },
     { name: "handleRelationshipsRoutes", handle: handleRelationshipsRoutes },
     {
@@ -370,6 +372,15 @@ describe("lazy handle* path guards", () => {
     ).resolves.toBe(false);
     await expect(
       handleAccountsRoutes({ method: 1, pathname: "/api/accounts" } as never),
+    ).resolves.toBe(false);
+  });
+
+  it("claims only the model-settings prefix, not its sibling names", async () => {
+    await expect(
+      handleModelSettingsRoutes(asCtx("GET", "/api/model-settingsx")),
+    ).resolves.toBe(false);
+    await expect(
+      handleModelSettingsRoutes(asCtx("GET", "/api/models")),
     ).resolves.toBe(false);
   });
 

@@ -278,6 +278,7 @@ const IONICONS = {
 /** Canonical first-party launcher destinations, including AOSP-only apps. */
 const FIRST_PARTY_ICONS: Readonly<Record<string, LauncherIconAsset>> = {
   settings: IONICONS.settings,
+  models: IONICONS.layers,
   wallet: IONICONS.wallet,
   tasks: IONICONS.folderOpen,
   calendar: IONICONS.calendar,

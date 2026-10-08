@@ -8,9 +8,17 @@
  */
 import type { ActionResult, ContentValue, IAgentRuntime } from "@elizaos/core";
 import { BirdeyeProvider } from "../birdeye/birdeye";
-import { searchBirdeyeTokens } from "../birdeye/search-category";
+import {
+  type BirdeyeTokenSearchMode,
+  searchBirdeyeTokens,
+} from "../birdeye/search-category";
 import type { WalletPortfolioResponse } from "../birdeye/types/api/wallet";
-import { extractAddresses } from "../birdeye/utils";
+import type { BirdeyeSupportedChain } from "../birdeye/types/shared";
+import {
+  BIRDEYE_SUPPORTED_CHAINS,
+  CHAIN_ALIASES,
+  extractAddresses,
+} from "../birdeye/utils";
 import type { DexScreenerService } from "../dexscreener/service";
 import type {
   DexScreenerBoostedToken,
@@ -18,7 +26,11 @@ import type {
   DexScreenerProfile,
   DexScreenerServiceResponse,
 } from "../dexscreener/types";
-import type { TokenInfoDispatchContext, TokenInfoProvider } from "./types";
+import type {
+  TokenInfoDispatchContext,
+  TokenInfoParams,
+  TokenInfoProvider,
+} from "./types";
 
 function success(text: string, data: Record<string, unknown>): ActionResult {
   return {
@@ -370,6 +382,34 @@ function formatBirdeyeWallet(
   return `Wallet ${address}\nTotal value: $${Number(totalValue).toLocaleString()}\nHoldings:\n${holdings}`;
 }
 
+/**
+ * Maps the planner's `kind` hint to a Birdeye search mode. Without a hint the
+ * search infers the mode from the query, which recognizes Solana base58 mints
+ * as well as EVM and Sui addresses.
+ */
+export function birdeyeSearchMode(
+  kind: TokenInfoParams["kind"],
+): BirdeyeTokenSearchMode {
+  if (kind === "token-address") return "address";
+  if (kind === "token-symbol") return "symbol";
+  return "auto";
+}
+
+/**
+ * Resolves the planner's `chain` param to a concrete Birdeye chain id, or
+ * undefined when it names no specific chain (for example a provider name).
+ */
+export function birdeyeChainFilter(
+  chain: string | undefined,
+): BirdeyeSupportedChain | undefined {
+  if (!chain) return undefined;
+  const normalized = chain.trim().toLowerCase();
+  const resolved =
+    CHAIN_ALIASES[normalized] ??
+    BIRDEYE_SUPPORTED_CHAINS.find((supported) => supported === normalized);
+  return resolved === "evm" ? undefined : resolved;
+}
+
 async function executeBirdeye(
   context: TokenInfoDispatchContext,
 ): Promise<ActionResult> {
@@ -386,13 +426,11 @@ async function executeBirdeye(
           ),
         );
       }
-      const mode =
-        params.kind === "token-address" || /^0x[a-fA-F0-9]{40}$/.test(query)
-          ? "address"
-          : "symbol";
+      const chain = birdeyeChainFilter(params.chain);
       const result = await searchBirdeyeTokens(context.runtime, {
         query,
-        mode,
+        mode: birdeyeSearchMode(params.kind),
+        filters: chain ? { chain } : undefined,
       });
       return emit(
         context,

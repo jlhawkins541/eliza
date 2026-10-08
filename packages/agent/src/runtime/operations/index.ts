@@ -30,6 +30,10 @@ export {
   FilesystemRuntimeOperationRepository,
   getDefaultRepository,
 } from "./repository.ts";
+export {
+  createRuntimeOperationStrategies,
+  type RuntimeOperationStrategyDeps,
+} from "./strategy-table.ts";
 export * from "./types.ts";
 export {
   _resetDefaultSecretsManagerForTesting,

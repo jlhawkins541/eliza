@@ -175,6 +175,41 @@ describe("compat route auth policy table", () => {
     ).toBeNull();
   });
 
+  it("requires the owner for every model-settings route, including unknown sub-paths", async () => {
+    for (const [method, pathname] of [
+      ["GET", "/api/model-settings"],
+      ["GET", "/api/model-settings/providers/ollama/models"],
+      ["POST", "/api/model-settings/activate"],
+      ["DELETE", "/api/model-settings/not-a-route"],
+    ] as const) {
+      expect(resolveCompatRouteAuthPolicy(method, pathname)).toMatchObject({
+        id: "model-settings",
+        tier: "OWNER",
+      });
+      expect(isCompatManagedRoute(pathname)).toBe(true);
+    }
+    expect(
+      resolveCompatRouteAuthPolicy("GET", "/api/model-settingsx"),
+    ).toBeNull();
+    expect(isCompatManagedRoute("/api/model-settingsx")).toBe(false);
+
+    const req = fakeReq({
+      method: "POST",
+      pathname: "/api/model-settings/activate",
+    });
+    const res = fakeRes();
+    await expect(
+      enforceCompatRouteAuthPolicy(
+        req,
+        res.res,
+        STATE,
+        "POST",
+        "/api/model-settings/activate",
+      ),
+    ).resolves.toBe("denied");
+    expect(res.status()).toBe(401);
+  });
+
   it("fails closed for undeclared app-core-managed routes", async () => {
     const req = fakeReq({ method: "GET", pathname: "/api/dev/not-declared" });
     const res = fakeRes();

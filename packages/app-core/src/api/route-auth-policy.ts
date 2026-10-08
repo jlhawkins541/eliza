@@ -254,6 +254,10 @@ export const COMPAT_ROUTE_AUTH_POLICIES: readonly CompatRouteAuthPolicy[] = [
   ownerExact("agent.reset", "POST", "/api/agent/reset"),
   ownerPrefix("credential-tunnel", "/api/credential-tunnel"),
   ownerPrefix("database.rows", "/api/database/"),
+  // Model provider status, catalogs, and activation. The agent handler also
+  // checks the owner role itself; this gate keeps the app-core host from
+  // passing a non-owner session through to it.
+  ownerPrefix("model-settings", "/api/model-settings"),
 
   // Device-secret bearer auth is enforced by internal-routes.ts. The
   // dispatcher declares it public so the handler's host-secret auth can run.
@@ -275,6 +279,7 @@ const COMPAT_MANAGED_PREFIXES = [
   "/api/i18n/",
   "/api/internal/",
   "/api/local-inference/",
+  "/api/model-settings",
   "/api/voice/",
   "/api/plugins",
   "/api/pool",

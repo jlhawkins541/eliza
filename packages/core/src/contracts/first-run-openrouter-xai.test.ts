@@ -36,4 +36,19 @@ describe("OpenRouter and xAI runtime setup account authority", () => {
 			);
 		}
 	});
+
+	it("routes Grok through the OpenAI-compatible plugin that actually exists", () => {
+		// The account pool exports the xAI key as OPENAI_API_KEY with the
+		// api.x.ai base URL, so plugin-openai is the model handler. A catalog
+		// entry naming a package that is not installable leaves Grok with no
+		// TEXT handler and no ELIZA_BRAIN_PROVIDER pin.
+		for (const alias of ["xai", "xai-api", "grok"] as const) {
+			expect(getFirstRunProviderOption(alias)?.pluginName).toBe(
+				"@elizaos/plugin-openai",
+			);
+		}
+		expect(getFirstRunProviderOption("grok")?.pluginName).toBe(
+			getFirstRunProviderOption("moonshot")?.pluginName,
+		);
+	});
 });

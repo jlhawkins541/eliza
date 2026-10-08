@@ -7,6 +7,7 @@ import { expect, it } from "vitest";
 
 import { describeLive } from "../../../packages/app-core/test/helpers/live-agent-test";
 import { openaiPlugin } from "../index";
+import { handleTextEmbedding } from "../models";
 import { getAuthHeader, getBaseURL } from "../utils/config";
 
 describeLive(
@@ -42,14 +43,11 @@ describeLive(
 
     it("generates embeddings with TEXT_EMBEDDING", async () => {
       const { runtime } = harness();
-      const handler = openaiPlugin.models?.[ModelType.TEXT_EMBEDDING];
-      if (!handler) {
-        throw new Error("TEXT_EMBEDDING handler is unavailable");
-      }
-
-      const response = (await handler(runtime, {
+      // TEXT_EMBEDDING registers in init() behind the endpoint gate, so the
+      // live suite calls the handler the gate would register.
+      const response = await handleTextEmbedding(runtime, {
         text: "Eliza live embedding smoke test",
-      })) as number[];
+      });
 
       expect(Array.isArray(response)).toBe(true);
       expect(response.length).toBeGreaterThan(0);

@@ -36,6 +36,7 @@ import {
   defaultAgentHostBridge,
   setAgentHostBridge,
 } from "./host-bridge.ts";
+import { resolvePreferredProviderPluginName } from "./model-resolution.ts";
 import { collectPluginNames } from "./plugin-collector.ts";
 
 // applyCloudConfigToEnv keeps inference cloud-routed for provisioned containers,
@@ -1447,6 +1448,24 @@ describe("canonical route to runtime provider identity", () => {
     expect(resolveEmbeddingProviderPluginName(config)).toBe(
       "@elizaos/plugin-openai",
     );
+  });
+
+  it("pins a Grok route to the OpenAI plugin's runtime registration name", () => {
+    const config = {
+      serviceRouting: {
+        llmText: { backend: "grok", transport: "direct" },
+      },
+    } as ElizaConfig;
+    const resolved = [
+      {
+        name: "@elizaos/plugin-openai",
+        plugin: { name: "openai", description: "test" },
+      },
+    ];
+
+    const pluginName = resolvePreferredProviderPluginName(config);
+    expect(pluginName).toBe("@elizaos/plugin-openai");
+    expect(resolveRuntimeProviderName(resolved, pluginName)).toBe("openai");
   });
 
   it("resolves vault-backed cloud credentials before the cloud projection is reapplied", async () => {

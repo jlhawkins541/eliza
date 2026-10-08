@@ -592,6 +592,9 @@ const VIEW_ID_TO_SCOPE: Record<string, ConversationScope> = {
   automations: "page-automations",
   "plugins-page": "page-plugins",
   settings: "page-settings",
+  // The Models page is the settings ai-model section promoted to a top-level
+  // view, so it shares the settings live-state surface.
+  models: "page-settings",
   wallet: "page-wallet",
   browser: "page-browser",
   apps: "page-apps",

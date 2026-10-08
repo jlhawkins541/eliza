@@ -141,11 +141,21 @@ describe("navigation built-in route descriptors", () => {
     expect(alias?.surface).toBe(canonical?.surface);
   });
 
+  it("routes the Models page at /models inside the Settings group", () => {
+    expect(TAB_PATHS.models).toBe("/models");
+    expect(tabFromPath("/models")).toBe("models");
+    expect(titleForTab("models")).toBe("Models");
+    const settingsGroup = ALL_TAB_GROUPS.find(
+      (group) => group.label === "Settings",
+    );
+    expect(settingsGroup?.tabs).toEqual(["settings", "models"]);
+  });
+
   it("does not classify plugin-provided tab ids as built-ins", () => {
     expect(resolveBuiltinRouteDescriptor("some-plugin-tab")).toBeNull();
   });
 
-  it.each(["database", "memories", "tasks", "automations"] as const)(
+  it.each(["database", "memories", "tasks", "automations", "models"] as const)(
     "delegates %s width and gutter geometry to its FramedPage",
     (id) => {
       expect(resolveBuiltinRouteDescriptor(id)?.layout).toEqual({

@@ -11,6 +11,9 @@ import { ElizaError, logger } from "@elizaos/core";
 import {
   DEFAULT_ELIZA_CLOUD_FREE_TEXT_MODEL,
   DEFAULT_ELIZA_CLOUD_TEXT_MODEL,
+  DEFAULT_OLLAMA_ENDPOINT,
+  resolveOllamaEndpoint,
+  resolveOpenAiEndpoint,
 } from "@elizaos/shared";
 import { isMobilePlatform } from "@elizaos/shared/runtime-env";
 import { resolveModelsCacheDir } from "../config/paths.ts";
@@ -208,6 +211,36 @@ export interface ProviderCache {
   providerId: string;
   fetchedAt: string;
   models: CachedModel[];
+  /**
+   * Endpoint the catalog was fetched from. Records written before endpoints
+   * were tracked omit it; an endpoint-aware read treats those as stale.
+   */
+  endpoint?: string | null;
+}
+
+/**
+ * Typed outcome of one catalog request. An unreachable endpoint or a rejected
+ * credential is never reported as an empty catalog.
+ */
+export type ProviderCatalogProbe =
+  | { state: "ok"; models: CachedModel[] }
+  | { state: "no-models" }
+  | { state: "unreachable"; detail: string }
+  | { state: "auth-failed"; detail: string };
+
+function describeFetchError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function catalogFromModels(models: CachedModel[]): ProviderCatalogProbe {
+  return models.length > 0 ? { state: "ok", models } : { state: "no-models" };
+}
+
+function catalogFromHttpStatus(status: number): ProviderCatalogProbe {
+  if (status === 401 || status === 403) {
+    return { state: "auth-failed", detail: `HTTP ${status}` };
+  }
+  return { state: "unreachable", detail: `HTTP ${status}` };
 }
 
 export function classifyModel(modelId: string): ModelCategory {
@@ -285,6 +318,7 @@ const PROVIDER_ENV_KEYS: Record<
     envKey: "GOOGLE_GENERATIVE_AI_API_KEY",
     altEnvKeys: ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
   },
+  // Ollama is keyless; its endpoint comes from resolveProviderCatalogEndpoint.
   ollama: { envKey: "OLLAMA_BASE_URL" },
 };
 
@@ -319,11 +353,20 @@ export function providerCachePath(providerId: string): string {
   return result;
 }
 
-export function readProviderCache(providerId: string): ProviderCache | null {
+/**
+ * Read a fresh cache record. Passing `options.endpoint` makes the read
+ * endpoint-aware: a catalog fetched from a different base URL is a miss, so a
+ * changed `OPENAI_BASE_URL` or Ollama host never serves the old host's models.
+ */
+export function readProviderCache(
+  providerId: string,
+  options?: { endpoint: string | null },
+): ProviderCache | null {
   try {
     const raw = fs.readFileSync(providerCachePath(providerId), "utf-8");
     const cache = JSON.parse(raw) as ProviderCache;
     if (cache.version !== 1 || !cache.fetchedAt || !cache.models) return null;
+    if (options && (cache.endpoint ?? null) !== options.endpoint) return null;
     const age = Date.now() - new Date(cache.fetchedAt).getTime();
     if (age > MODELS_CACHE_TTL_MS) return null;
     return cache;
@@ -349,12 +392,16 @@ export function writeProviderCache(cache: ProviderCache): void {
 
 // ── Provider fetchers ────────────────────────────────────────────────────
 
-/** Fetch models from unknown provider's /v1/models endpoint (standard REST). */
-export async function fetchModelsREST(
+/**
+ * Request an OpenAI-compatible `/models` catalog and classify the outcome.
+ * Used for OpenAI (including a configured `OPENAI_BASE_URL`), xAI, and the
+ * other `/v1/models` providers.
+ */
+export async function probeOpenAiCompatibleCatalog(
   providerId: string,
   apiKey: string,
   baseUrl: string,
-): Promise<CachedModel[]> {
+): Promise<ProviderCatalogProbe> {
   try {
     const url = `${baseUrl.replace(/\/+$/, "")}/models`;
     const headers: Record<string, string> = {};
@@ -363,24 +410,37 @@ export async function fetchModelsREST(
       headers,
       signal: AbortSignal.timeout(DEFAULT_MODEL_CATALOG_FETCH_TIMEOUT_MS),
     });
-    if (!res.ok) return [];
+    if (!res.ok) return catalogFromHttpStatus(res.status);
     const data = (await res.json()) as {
       data?: Array<{ id: string; name?: string; type?: string }>;
     };
-    return (data.data ?? [])
-      .map((m) => ({
-        id: m.id,
-        name: m.name ?? m.id,
-        category: m.type ? restTypeToCategory(m.type) : classifyModel(m.id),
-      }))
-      .sort((a, b) => a.id.localeCompare(b.id));
-  } catch (e: unknown) {
-    // error-policy:J4 an unavailable catalog is an explicit empty provider list.
-    logger.warn(
-      `[model-catalog] Failed to fetch models for ${providerId}: ${e instanceof Error ? e.message : e}`,
+    return catalogFromModels(
+      (data.data ?? [])
+        .map((m) => ({
+          id: m.id,
+          name: m.name ?? m.id,
+          category: m.type ? restTypeToCategory(m.type) : classifyModel(m.id),
+        }))
+        .sort((a, b) => a.id.localeCompare(b.id)),
     );
-    return [];
+  } catch (e: unknown) {
+    // error-policy:J4 a failed request is the explicit unreachable state.
+    const detail = describeFetchError(e);
+    logger.warn(
+      `[model-catalog] Failed to fetch models for ${providerId}: ${detail}`,
+    );
+    return { state: "unreachable", detail };
   }
+}
+
+/** Fetch models from unknown provider's /v1/models endpoint (standard REST). */
+export async function fetchModelsREST(
+  providerId: string,
+  apiKey: string,
+  baseUrl: string,
+): Promise<CachedModel[]> {
+  const probe = await probeOpenAiCompatibleCatalog(providerId, apiKey, baseUrl);
+  return probe.state === "ok" ? probe.models : [];
 }
 
 export function restTypeToCategory(type: string): ModelCategory {
@@ -394,9 +454,10 @@ export function restTypeToCategory(type: string): ModelCategory {
   return classifyModel(type);
 }
 
-export async function fetchAnthropicModels(
+/** Request the Anthropic model catalog and classify the outcome. */
+export async function probeAnthropicCatalog(
   apiKey: string,
-): Promise<CachedModel[]> {
+): Promise<ProviderCatalogProbe> {
   try {
     const headers: Record<string, string> = {
       "anthropic-version": "2023-06-01",
@@ -406,24 +467,32 @@ export async function fetchAnthropicModels(
       headers,
       signal: AbortSignal.timeout(DEFAULT_MODEL_CATALOG_FETCH_TIMEOUT_MS),
     });
-    if (!res.ok) return [];
+    if (!res.ok) return catalogFromHttpStatus(res.status);
     const data = (await res.json()) as {
       data?: Array<{ id: string; display_name?: string; type?: string }>;
     };
-    return (data.data ?? [])
-      .map((m) => ({
-        id: m.id,
-        name: m.display_name ?? m.id,
-        category: classifyModel(m.id),
-      }))
-      .sort((a, b) => a.id.localeCompare(b.id));
-  } catch (e: unknown) {
-    // error-policy:J4 an unavailable catalog is an explicit empty provider list.
-    logger.warn(
-      `[model-catalog] Failed to fetch Anthropic models: ${e instanceof Error ? e.message : e}`,
+    return catalogFromModels(
+      (data.data ?? [])
+        .map((m) => ({
+          id: m.id,
+          name: m.display_name ?? m.id,
+          category: classifyModel(m.id),
+        }))
+        .sort((a, b) => a.id.localeCompare(b.id)),
     );
-    return [];
+  } catch (e: unknown) {
+    // error-policy:J4 a failed request is the explicit unreachable state.
+    const detail = describeFetchError(e);
+    logger.warn(`[model-catalog] Failed to fetch Anthropic models: ${detail}`);
+    return { state: "unreachable", detail };
   }
+}
+
+export async function fetchAnthropicModels(
+  apiKey: string,
+): Promise<CachedModel[]> {
+  const probe = await probeAnthropicCatalog(apiKey);
+  return probe.state === "ok" ? probe.models : [];
 }
 
 export async function fetchGoogleModels(
@@ -457,11 +526,15 @@ export async function fetchGoogleModels(
   }
 }
 
+/**
+ * Request the Ollama `/api/tags` catalog at `baseUrl` (the server base, with
+ * or without a trailing `/api`).
+ */
 export async function fetchOllamaModels(
   baseUrl: string,
-): Promise<CachedModel[]> {
+): Promise<ProviderCatalogProbe> {
   try {
-    let urlStr = baseUrl.replace(/\/+$/, "");
+    let urlStr = baseUrl.replace(/\/+$/, "").replace(/\/api$/, "");
     if (!urlStr.startsWith("http://") && !urlStr.startsWith("https://")) {
       urlStr = `http://${urlStr}`;
     }
@@ -470,25 +543,32 @@ export async function fetchOllamaModels(
     // most devices (and on mobile the connect stalls on the OS TCP timeout for
     // ~15s). This runs on the API-server startup path, so an unbounded fetch
     // there blocked the whole boot/`server.listen` for ~15s (#11903). A short
-    // AbortSignal keeps a missing Ollama a fast, cheap "no models".
+    // AbortSignal keeps a missing Ollama a fast, explicit "unreachable".
     const res = await fetch(`${urlStr}/api/tags`, {
       signal: AbortSignal.timeout(2_000),
     });
-    if (!res.ok) return [];
+    if (!res.ok) return catalogFromHttpStatus(res.status);
     const data = (await res.json()) as { models?: Array<{ name: string }> };
-    return (data.models ?? []).map((m) => ({
-      id: m.name,
-      name: m.name,
-      category: classifyModel(m.name),
-    }));
+    return catalogFromModels(
+      (data.models ?? []).map((m) => ({
+        id: m.name,
+        name: m.name,
+        category: classifyModel(m.name),
+      })),
+    );
   } catch (e: unknown) {
-    const message = `[model-catalog] Failed to fetch Ollama models: ${e instanceof Error ? e.message : e}`;
-    // A localhost probe discovers Ollama when it happens to be installed; its
-    // absence is the normal case. An operator-supplied endpoint is intentional
-    // configuration, so retain an actionable warning for that path.
-    if (process.env.OLLAMA_BASE_URL?.trim()) logger.warn(message);
-    else logger.debug(message);
-    return [];
+    // error-policy:J4 a failed request is the explicit unreachable state.
+    const detail = describeFetchError(e);
+    const message = `[model-catalog] Failed to fetch Ollama models from ${baseUrl}: ${detail}`;
+    // A default localhost probe discovers Ollama when it happens to be
+    // installed; its absence is the normal case. An operator-supplied endpoint
+    // is intentional configuration, so retain an actionable warning for it.
+    if (resolveOllamaEndpoint((key) => process.env[key]).isDefault) {
+      logger.debug(message);
+    } else {
+      logger.warn(message);
+    }
+    return { state: "unreachable", detail };
   }
 }
 
@@ -660,8 +740,10 @@ export async function fetchProviderModels(
       return fetchAnthropicModels(apiKey);
     case "google-genai":
       return fetchGoogleModels(apiKey);
-    case "ollama":
-      return fetchOllamaModels(baseUrl || "http://localhost:11434");
+    case "ollama": {
+      const probe = await fetchOllamaModels(baseUrl || DEFAULT_OLLAMA_ENDPOINT);
+      return probe.state === "ok" ? probe.models : [];
+    }
     case "openrouter":
       return fetchOpenRouterModels(apiKey);
     case "openai":
@@ -710,17 +792,38 @@ export async function fetchProviderModels(
   }
 }
 
+/**
+ * Resolve the endpoint a provider's catalog is requested from. Ollama and
+ * OpenAI follow the same precedence their plugins use, so the listed models
+ * come from the host the runtime will actually call.
+ */
+export function resolveProviderCatalogEndpoint(
+  providerId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const read = (key: string) => env[key];
+  if (providerId === "ollama") return resolveOllamaEndpoint(read).url;
+  if (providerId === "openai") return resolveOpenAiEndpoint(read).url;
+  if (providerId === "nearai") {
+    return env.NEARAI_BASE_URL?.trim() || "https://cloud-api.near.ai/v1";
+  }
+  return PROVIDER_ENV_KEYS[providerId]?.baseUrl;
+}
+
 /** Fetch + cache a single provider. Returns cached models or empty array. */
 export async function getOrFetchProvider(
   providerId: string,
   force = false,
 ): Promise<CachedModel[]> {
+  const cfg = PROVIDER_ENV_KEYS[providerId];
+  const baseUrl = cfg ? resolveProviderCatalogEndpoint(providerId) : undefined;
   if (!force) {
-    const cached = readProviderCache(providerId);
+    const cached = readProviderCache(providerId, {
+      endpoint: baseUrl ?? null,
+    });
     if (cached) return cached.models;
   }
 
-  const cfg = PROVIDER_ENV_KEYS[providerId];
   if (!cfg) return [];
 
   let keyValue = process.env[cfg.envKey]?.trim();
@@ -729,12 +832,6 @@ export async function getOrFetchProvider(
       keyValue = process.env[alt]?.trim();
       if (keyValue) break;
     }
-  }
-
-  let baseUrl = cfg.baseUrl;
-  if (providerId === "nearai") {
-    baseUrl =
-      process.env.NEARAI_BASE_URL?.trim() || "https://cloud-api.near.ai/v1";
   }
 
   // Ollama is a desktop localhost server (default :11434). No phone runs it, and
@@ -755,6 +852,7 @@ export async function getOrFetchProvider(
       providerId,
       fetchedAt: new Date().toISOString(),
       models,
+      endpoint: baseUrl ?? null,
     });
   }
   return models;
