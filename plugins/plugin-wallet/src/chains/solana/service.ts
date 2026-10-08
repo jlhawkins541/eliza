@@ -905,9 +905,11 @@ export class SolanaService extends Service {
       userPublicKey: params.walletPublicKey.toBase58(),
       dynamicComputeUnitLimit: true,
       dynamicSlippage: params.slippageBps === undefined,
-      priorityLevelWithMaxLamports: {
-        maxLamports: 4000000,
-        priorityLevel: "veryHigh",
+      prioritizationFeeLamports: {
+        priorityLevelWithMaxLamports: {
+          maxLamports: 4000000,
+          priorityLevel: "veryHigh",
+        },
       },
     };
 

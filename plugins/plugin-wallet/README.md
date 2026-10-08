@@ -26,6 +26,8 @@ All write operations default to `mode=prepare` (stages the transaction but does 
 | `search_address` | Birdeye wallet portfolio lookup by address. |
 | `token_safety` | GoPlus rug-risk check of a Solana mint with an avoid/caution/no-major-flags verdict (read-only). |
 | `onchain_token_safety` | Read-only on-chain Solana mint safety check (param: `address` = the mint). Reads only from `SOLANA_RPC_URL` with no API key and no signing; when it is unset the result is a typed `PROVIDER_UNAVAILABLE` with no network call. Reports the token program, supply and decimals, mint and freeze authority, every Token-2022 risk extension decoded (TransferHook, TransferFeeConfig with the active fee tier, PermanentDelegate, NonTransferable, DefaultAccountState, MintCloseAuthority, PausableConfig), other extensions by name, and the largest token accounts' share of supply (token accounts, not owners; the RPC returns at most 20). A check that could not run reads `UNKNOWN` with its typed code, never a pass. Public RPCs often answer `getTokenLargestAccounts` with HTTP 429 or JSON-RPC -32010, so holder concentration reads `UNKNOWN` there. Independent of the Birdeye security table in `token_info` and of the GoPlus `token_safety` report. Like every `WALLET` subaction it needs plugin-wallet enabled and an ADMIN caller. |
+| `token_pairs` | DexScreener pools for a Solana mint: price, liquidity, 24h volume and pool age (read-only, no key). Thin liquidity, a pool under a day old, or no pool reporting its age adds caution and never clears a GoPlus flag. |
+| `social_signal` | LunarCrush Galaxy Score, AltRank and sentiment for a ticker (read-only, needs `LUNARCRUSH_API_KEY`). A low score adds caution and never clears a GoPlus flag. |
 
 ### LP management
 
@@ -43,6 +45,43 @@ Access via the `lpManagerPlugin` export; LP actions are surfaced as the `LIQUIDI
 - **Token info:** multi-provider dispatcher (DexScreener, Birdeye, CoinGecko).
 - **DeFi news:** via `defiNewsPlugin`.
 
+## Crypto terminal real trades
+
+The terminal's Real trade tab places Solana swaps signed either by Phantom in
+the browser or by the agent's own wallet. Each trade is quoted by Jupiter,
+simulated, and shown for review first. With Phantom, confirming opens
+Phantom's approval popup; the server sends the transaction only if Phantom
+signed the reviewed bytes unchanged and the signature is from the reviewed
+address. Phantom trades work in the default sign-only trade permission and need
+Phantom installed in the browser that opens the terminal (the desktop app's own
+window has no extension, so it offers the agent wallet). Agent requests can't
+review or send either kind.
+
+## Terminal MCP server
+
+`bun run --cwd plugins/plugin-wallet mcp` serves the crypto terminal's research
+tools over MCP (stdio) so a client such as Claude Desktop can use them while the
+agent is running: `terminal_markets`, `terminal_chart`, `token_safety`,
+`token_pairs`, `social_signal` and `trade_status`. Every tool is a read-only GET
+against the running agent's `/api/wallet/terminal/*` routes; none can review,
+sign or send a trade, which stays a person's tap in the terminal.
+
+It reads `packages/agent/.env`, sends the agent's `ELIZA_API_TOKEN` as a bearer
+header, and talks to the local agent port unless `ELIZA_TERMINAL_MCP_URL` names
+another origin. It needs the optional `@modelcontextprotocol/sdk` dependency.
+A Claude Desktop entry looks like:
+
+```json
+{
+  "mcpServers": {
+    "elizaos-terminal": {
+      "command": "bun",
+      "args": ["run", "--cwd", "/path/to/eliza/plugins/plugin-wallet", "mcp"]
+    }
+  }
+}
+```
+
 ## Wallet backends
 
 The plugin supports two signing backends, selected by `ELIZA_WALLET_BACKEND`:
@@ -50,6 +89,8 @@ The plugin supports two signing backends, selected by `ELIZA_WALLET_BACKEND`:
 - **`local`** — raw EOA private keys from environment variables or the OS keychain. Default for desktop.
 - **`steward`** — multi-tenant Steward signing service. Required for cloud and mobile deployments.
 - **`auto`** (default) — uses Steward when `ELIZA_CLOUD_PROVISIONED=1` or `ELIZA_WALLET_STEWARD_AUTO=1`, otherwise local.
+
+Any other value, such as a typo, fails with `WALLET_BACKEND_MODE_INVALID` rather than falling back to `auto`, so a misspelled `local` can never hand signing to Steward.
 
 ## Required configuration
 
@@ -70,6 +111,11 @@ Additional optional variables:
 | `BIRDEYE_API_KEY` | Direct Birdeye access (falls back to Eliza Cloud route) |
 | `BIRDEYE_WALLET_ADDR` | Enables portfolio provider for a specific address |
 | `BIRDEYE_NO_TRENDING` | Disable trending provider |
+| `KRAKEN_API_KEY`, `KRAKEN_API_SECRET` | Kraken keys for the terminal's exchange limit orders (trade rights only) |
+| `OKX_API_KEY`, `OKX_API_SECRET`, `OKX_API_PASSPHRASE` | OKX keys for the terminal's exchange limit orders (trade rights only); `OKX_API_BASE_URL` overrides the https origin |
+| `WALLET_TERMINAL_MAX_ORDER_USD` | Largest value of one terminal exchange order, in USD (default 100) |
+| `ELIZA_TERMINAL_MCP_URL` | Agent origin the terminal MCP server reads from; defaults to the local agent port. Must be https unless it is this machine |
+| `LUNARCRUSH_API_KEY` | LunarCrush key for the terminal's Social row and `social_signal`; kept on the server |
 | `ELIZA_AGENT_WALLET_AUTO_ENABLE` | Set to `0` to disable auto-enable |
 | `PUMPFUN_TRADE_LOCAL_URL` | Override PumpPortal local transaction API; default `https://pumpportal.fun/api/trade-local` |
 | `JUPITER_API_BASE_URL` | Override the Jupiter Swap API base; default `https://lite-api.jup.ag/swap/v1` |

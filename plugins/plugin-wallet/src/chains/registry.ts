@@ -19,7 +19,9 @@
  * replaceRecentBlockhash: true })` via `simulateVersionedTransaction` and
  * returns the typed result — it never resolves a signing keypair, never
  * calls a `WalletBackend` signer, and never calls `sendTransaction`/
- * `sendRawTransaction`/`confirmTransaction`.
+ * `sendRawTransaction`/`confirmTransaction`. The crypto terminal's reviewed
+ * trades (`src/api/terminal-trade.ts`) reuse the same Jupiter build and
+ * simulation helpers.
  */
 import {
   ElizaError,
@@ -77,7 +79,7 @@ import {
 } from "./solana/keypairUtils";
 import type { SolanaService } from "./solana/service";
 
-const SOL_MINT = "So11111111111111111111111111111111111111112";
+export const SOL_MINT = "So11111111111111111111111111111111111111112";
 const SOLANA_DEFAULT_RPC = "https://api.mainnet-beta.solana.com";
 const PUMPFUN_TRADE_LOCAL_URL = "https://pumpportal.fun/api/trade-local";
 const PUMPFUN_DEFAULT_PRIORITY_FEE_SOL = 0.00005;
@@ -419,7 +421,7 @@ function resolveSolanaMint(token: string | undefined): string {
   return normalized;
 }
 
-function getSolanaConnection(runtime: IAgentRuntime): Connection {
+export function getSolanaConnection(runtime: IAgentRuntime): Connection {
   const service = runtime.getService(
     SOLANA_SERVICE_NAME,
   ) as SolanaService | null;
@@ -440,7 +442,7 @@ function getSolanaConnection(runtime: IAgentRuntime): Connection {
  * function never throws for that case, only for a transport failure calling
  * the RPC itself, matching the execute paths' error style.
  */
-async function simulateVersionedTransaction(
+export async function simulateVersionedTransaction(
   connection: Connection,
   transaction: VersionedTransaction,
 ): Promise<
@@ -797,7 +799,7 @@ export async function simulatePumpFunBuy(
   };
 }
 
-async function getSolanaTokenDecimals(
+export async function getSolanaTokenDecimals(
   connection: Connection,
   mintAddress: string,
 ): Promise<number> {
@@ -910,10 +912,24 @@ async function executeSolanaTransfer(
   };
 }
 
-interface JupiterSwapBuild {
+/** Most priority fee the swap build may add, in lamports (0.004 SOL). */
+export const JUPITER_MAX_PRIORITY_FEE_LAMPORTS = 4_000_000;
+
+export interface JupiterSwapBuild {
   readonly transaction: VersionedTransaction;
   readonly inputMint: string;
   readonly outputMint: string;
+  readonly inputDecimals: number;
+  /** Input amount in base units, as quoted. */
+  readonly inAmountRaw: string;
+  /** Quoted output in base units, or null when Jupiter omitted it. */
+  readonly outAmountRaw: string | null;
+  /** Least output the transaction accepts (Jupiter `otherAmountThreshold`). */
+  readonly minOutAmountRaw: string | null;
+  /** Priority fee the swap build set, when Jupiter reported it. */
+  readonly priorityFeeLamports: number | null;
+  /** Last block height at which the built transaction's blockhash is valid. */
+  readonly lastValidBlockHeight: number | null;
   readonly route: WalletRouterSimulation["route"];
   readonly effectiveSlippageBps: number | null;
   readonly quoteSummary: Readonly<Record<string, string | number | null>>;
@@ -921,15 +937,20 @@ interface JupiterSwapBuild {
 
 /**
  * Requests the Jupiter quote and the built swap transaction for it. Shared
- * by `execute` and `simulate` so both build the exact same unsigned
- * transaction from the exact same quote — simulate never sees a different
- * route than execute would submit.
+ * by `execute`, `simulate`, and the crypto terminal's reviewed trades so each
+ * builds the exact same unsigned transaction from the exact same quote —
+ * simulate never sees a different route than execute would submit.
+ *
+ * With `jitoTipLamports`, Jupiter adds a Jito tip transfer instead of a
+ * priority-fee level (the API takes one or the other), and the transaction
+ * must then be sent through a Jito block engine for the tip to buy anything.
  */
-async function fetchJupiterSwapTransaction(
+export async function fetchJupiterSwapTransaction(
   params: WalletRouterParams,
-  context: WalletRouterContext,
+  runtime: IAgentRuntime,
   connection: Connection,
   userPublicKey: PublicKey,
+  options: { jitoTipLamports?: number } = {},
 ): Promise<JupiterSwapBuild> {
   const inputMint = resolveSolanaMint(params.fromToken);
   const outputMint = resolveSolanaMint(params.toToken);
@@ -951,8 +972,8 @@ async function fetchJupiterSwapTransaction(
     quoteParams.set("dynamicSlippage", "true");
   }
 
-  const jupiterApiBaseUrl = resolveJupiterApiBaseUrl(context.runtime);
-  const fetchFn = context.runtime.fetch || globalThis.fetch;
+  const jupiterApiBaseUrl = resolveJupiterApiBaseUrl(runtime);
+  const fetchFn = runtime.fetch || globalThis.fetch;
   const quoteData = await fetchJupiterJson(
     fetchFn,
     `${jupiterApiBaseUrl}/quote?${quoteParams.toString()}`,
@@ -978,10 +999,15 @@ async function fetchJupiterSwapTransaction(
         userPublicKey: userPublicKey.toBase58(),
         dynamicComputeUnitLimit: true,
         dynamicSlippage: params.slippageBps === undefined,
-        priorityLevelWithMaxLamports: {
-          maxLamports: 4_000_000,
-          priorityLevel: "veryHigh",
-        },
+        prioritizationFeeLamports:
+          options.jitoTipLamports === undefined
+            ? {
+                priorityLevelWithMaxLamports: {
+                  maxLamports: JUPITER_MAX_PRIORITY_FEE_LAMPORTS,
+                  priorityLevel: "veryHigh",
+                },
+              }
+            : { jitoTipLamports: options.jitoTipLamports },
       }),
     },
   );
@@ -1040,20 +1066,37 @@ async function fetchJupiterSwapTransaction(
       })
     : [];
 
+  const inAmountRaw =
+    typeof quoteData.inAmount === "string"
+      ? quoteData.inAmount
+      : adjustedAmount;
   return {
     transaction,
     inputMint,
     outputMint,
+    inputDecimals: decimals,
+    inAmountRaw,
+    outAmountRaw:
+      typeof quoteData.outAmount === "string" ? quoteData.outAmount : null,
+    minOutAmountRaw:
+      typeof quoteData.otherAmountThreshold === "string"
+        ? quoteData.otherAmountThreshold
+        : null,
+    priorityFeeLamports:
+      typeof swapData.prioritizationFeeLamports === "number"
+        ? swapData.prioritizationFeeLamports
+        : null,
+    lastValidBlockHeight:
+      typeof swapData.lastValidBlockHeight === "number"
+        ? swapData.lastValidBlockHeight
+        : null,
     route,
     effectiveSlippageBps:
       typeof effectiveSlippageBps === "number" ? effectiveSlippageBps : null,
     quoteSummary: {
       inToken: inputMint,
       outToken: outputMint,
-      inAmount:
-        typeof quoteData.inAmount === "string"
-          ? quoteData.inAmount
-          : adjustedAmount,
+      inAmount: inAmountRaw,
       outAmount:
         typeof quoteData.outAmount === "string" ? quoteData.outAmount : null,
       priceImpactPct:
@@ -1081,7 +1124,7 @@ async function executeSolanaSwap(
   const { transaction, inputMint, outputMint } =
     await fetchJupiterSwapTransaction(
       params,
-      context,
+      context.runtime,
       connection,
       walletPublicKey,
     );
@@ -1151,7 +1194,7 @@ export async function simulateSolanaSwap(
     quoteSummary,
   } = await fetchJupiterSwapTransaction(
     params,
-    context,
+    context.runtime,
     connection,
     userPublicKey,
   );

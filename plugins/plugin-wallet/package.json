@@ -73,7 +73,12 @@
     "format:check": "bunx @biomejs/biome format .",
     "test": "vitest run --config ./vitest.config.ts",
     "test:watch": "vitest --config ./vitest.config.ts",
+    "check:crypto-queen": "bun src/characters/check-setup.ts",
+    "mcp": "bun src/mcp/run-terminal-mcp.ts",
     "clean": "node ../../packages/scripts/rm-path-recursive.mjs dist"
+  },
+  "optionalDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "peerDependencies": {
     "@elizaos/core": "workspace:*",

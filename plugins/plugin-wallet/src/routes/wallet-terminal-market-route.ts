@@ -5,7 +5,9 @@
  * returns one asset's USD price history.
  *
  * Both responses carry a `WalletMarketOverviewSource` so the client can tell
- * live, stale, and unavailable data apart. Successful upstream reads are cached
+ * live, stale, and unavailable data apart. When CoinGecko fails, the route
+ * asks CoinPaprika (`coinpaprika-backup.ts`) before falling back to the
+ * cache, and the source names whichever provider answered. Successful upstream reads are cached
  * briefly and concurrent misses share one request; when a refresh fails the
  * last good response is served marked `stale`, and with nothing cached the
  * route answers 502 rather than an empty-but-healthy list. No route here
@@ -15,6 +17,7 @@ import type http from "node:http";
 import { logger } from "@elizaos/core";
 import {
   buildCoinGeckoMarketsUrl,
+  COINGECKO_MARKET_LIMIT,
   COINGECKO_MARKET_PROVIDER,
   parseCoinGeckoMarkets,
 } from "@elizaos/shared";
@@ -25,11 +28,21 @@ import type {
   WalletTerminalChartResponse,
   WalletTerminalMarketsResponse,
 } from "../contracts.js";
+import {
+  COINPAPRIKA_ID_PATTERN,
+  COINPAPRIKA_MARKET_PROVIDER,
+  coinPaprikaHistoryUrl,
+  coinPaprikaSearchUrl,
+  coinPaprikaTickersUrl,
+  parseCoinPaprikaHistory,
+  parseCoinPaprikaSearch,
+  parseCoinPaprikaTickers,
+} from "./coinpaprika-backup.js";
 
 export const TERMINAL_MARKETS_PATH = "/api/wallet/terminal/markets";
 export const TERMINAL_CHART_PATH = "/api/wallet/terminal/chart";
 
-const COINGECKO_API_BASE = "https://api.coingecko.com/api/v3";
+export const COINGECKO_API_BASE = "https://api.coingecko.com/api/v3";
 const FETCH_TIMEOUT_MS = 8_000;
 const MARKETS_CACHE_TTL_MS = 60_000;
 const CHART_CACHE_TTL_MS: Record<WalletTerminalChartDays, number> = {
@@ -72,12 +85,17 @@ const chartCache = new Map<string, CacheEntry<WalletTerminalChartResponse>>();
 const chartInFlight = new Map<string, Promise<WalletTerminalChartResponse>>();
 const refreshBuckets = new Map<string, { count: number; resetAt: number }>();
 
+type MarketProvider =
+  | typeof COINGECKO_MARKET_PROVIDER
+  | typeof COINPAPRIKA_MARKET_PROVIDER;
+
 function source(
   available: boolean,
   stale: boolean,
   error: string | null,
+  provider: MarketProvider = COINGECKO_MARKET_PROVIDER,
 ): WalletMarketOverviewSource {
-  return { ...COINGECKO_MARKET_PROVIDER, available, stale, error };
+  return { ...provider, available, stale, error };
 }
 
 function errorMessage(error: unknown): string {
@@ -93,7 +111,7 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
-async function getJson(url: URL): Promise<unknown> {
+async function getJson(url: URL, provider = "CoinGecko"): Promise<unknown> {
   const response = await terminalFetch(url, {
     method: "GET",
     headers: {
@@ -102,12 +120,41 @@ async function getJson(url: URL): Promise<unknown> {
     },
   });
   if (response.status === 404) {
-    throw new UpstreamNotFoundError("CoinGecko has no such asset");
+    throw new UpstreamNotFoundError(`${provider} has no such asset`);
   }
   if (!response.ok) {
-    throw new Error(`CoinGecko responded ${response.status}`);
+    throw new Error(`${provider} responded ${response.status}`);
   }
   return response.json();
+}
+
+/**
+ * Run the CoinGecko read, and on any failure the CoinPaprika one. Only when
+ * both fail does the caller see an error, naming both causes; a "no such
+ * asset" from both stays a not-found.
+ */
+async function withBackup<T>(
+  primary: () => Promise<T>,
+  backup: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await primary();
+  } catch (primaryError) {
+    // error-policy:J2 the primary failure is kept and joined to the backup's.
+    try {
+      return await backup();
+    } catch (backupError) {
+      // error-policy:J2 both providers failed; the joined cause is rethrown.
+      const message = `${errorMessage(primaryError)}; backup: ${errorMessage(backupError)}`;
+      if (
+        primaryError instanceof UpstreamNotFoundError &&
+        backupError instanceof UpstreamNotFoundError
+      ) {
+        throw new UpstreamNotFoundError(message);
+      }
+      throw new Error(message);
+    }
+  }
 }
 
 /** Parse CoinGecko `market_chart` JSON into ordered, finite price points. */
@@ -142,7 +189,73 @@ export function parseCoinGeckoMarketChart(
   return points;
 }
 
+async function buildBackupMarkets(): Promise<WalletTerminalMarketsResponse> {
+  const markets = parseCoinPaprikaTickers(
+    await getJson(coinPaprikaTickersUrl(), "CoinPaprika"),
+    COINGECKO_MARKET_LIMIT,
+  );
+  if (markets.length === 0) {
+    throw new Error("CoinPaprika returned no usable market rows");
+  }
+  return {
+    generatedAt: new Date().toISOString(),
+    stale: false,
+    source: source(true, false, null, COINPAPRIKA_MARKET_PROVIDER),
+    markets,
+  };
+}
+
+/** A CoinPaprika id for a terminal asset id: as given, or found by search. */
+async function resolvePaprikaId(id: string): Promise<string> {
+  if (COINPAPRIKA_ID_PATTERN.test(id)) return id;
+  const found = parseCoinPaprikaSearch(
+    await getJson(coinPaprikaSearchUrl(id), "CoinPaprika"),
+  );
+  if (found === null) {
+    throw new UpstreamNotFoundError("CoinPaprika has no such asset");
+  }
+  return found;
+}
+
+async function buildBackupChart(
+  id: string,
+  days: WalletTerminalChartDays,
+): Promise<WalletTerminalChartResponse> {
+  const paprikaId = await resolvePaprikaId(id);
+  const points = parseCoinPaprikaHistory(
+    await getJson(
+      coinPaprikaHistoryUrl(paprikaId, days, new Date()),
+      "CoinPaprika",
+    ),
+  );
+  if (points.length < 2) {
+    throw new Error("CoinPaprika returned too few price points to chart");
+  }
+  return {
+    id,
+    days,
+    generatedAt: new Date().toISOString(),
+    stale: false,
+    source: source(true, false, null, COINPAPRIKA_MARKET_PROVIDER),
+    points,
+  };
+}
+
 async function buildMarkets(): Promise<WalletTerminalMarketsResponse> {
+  return withBackup(buildCoinGeckoMarkets, buildBackupMarkets);
+}
+
+async function buildChart(
+  id: string,
+  days: WalletTerminalChartDays,
+): Promise<WalletTerminalChartResponse> {
+  return withBackup(
+    () => buildCoinGeckoChart(id, days),
+    () => buildBackupChart(id, days),
+  );
+}
+
+async function buildCoinGeckoMarkets(): Promise<WalletTerminalMarketsResponse> {
   const markets = parseCoinGeckoMarkets(
     await getJson(buildCoinGeckoMarketsUrl()),
   ).map((market) => ({
@@ -165,7 +278,7 @@ async function buildMarkets(): Promise<WalletTerminalMarketsResponse> {
   };
 }
 
-async function buildChart(
+async function buildCoinGeckoChart(
   id: string,
   days: WalletTerminalChartDays,
 ): Promise<WalletTerminalChartResponse> {

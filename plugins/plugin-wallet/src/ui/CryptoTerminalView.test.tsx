@@ -7,12 +7,21 @@
  * Covers loading, live list, search, watchlist, chart, paper market and limit
  * orders, reservations, persistence, the unavailable-data state, confirmed
  * HUNT / SLEEP / OFF mode changes, price alerts fired by a later live price
- * and paused in OFF, and the GoPlus token safety check (served by the real
- * token safety route over a recorded payload).
+ * and paused in OFF, the PIN lock over real Web Crypto (set, lock, wrong PIN,
+ * unlock, idle auto-lock, forgot-PIN reset), the GoPlus token safety
+ * check (served by the real token safety route over a recorded payload), the
+ * LunarCrush Social row (the real social route over a sample payload, with
+ * and without a key), the DexScreener Liquidity row (the real pairs route over
+ * a sample payload, including the thin-liquidity caution), and
+ * the Real trade tab, served by the real wallet trade routes with Jupiter and
+ * Solana RPC doubles and a real signer over a generated key; the agent's
+ * trade-permission route and Phantom's injected provider (signing with a
+ * generated key, as its popup would on approve) are the only stand-ins there.
  */
 import { readFileSync } from "node:fs";
 import type http from "node:http";
 import { resolve } from "node:path";
+import { Keypair, type PublicKey, VersionedTransaction } from "@solana/web3.js";
 import {
   act,
   cleanup,
@@ -22,7 +31,18 @@ import {
   within,
 } from "@testing-library/react";
 import React from "react";
+import nacl from "tweetnacl";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  createTerminalExchangeHarness,
+  type TerminalExchangeHarness,
+} from "../api/__tests__/terminal-exchange-harness";
+import {
+  createTerminalTradeHarness,
+  type TerminalTradeHarness,
+} from "../api/__tests__/terminal-trade-harness";
+import { __resetTerminalExchangeForTests } from "../api/terminal-exchange";
+import { __resetTerminalTradesForTests } from "../api/terminal-trade";
 import {
   __expireWalletTerminalCachesForTests,
   __resetWalletTerminalMarketRouteForTests,
@@ -30,14 +50,27 @@ import {
   handleWalletTerminalMarketRoute,
 } from "../routes/wallet-terminal-market-route";
 import {
+  __resetWalletTerminalPairsRouteForTests,
+  __setWalletTerminalPairsFetchForTests,
+  handleWalletTerminalPairsRoute,
+} from "../routes/wallet-terminal-pairs-route";
+import {
+  __resetWalletTerminalSocialRouteForTests,
+  __setWalletTerminalSocialFetchForTests,
+  handleWalletTerminalSocialRoute,
+} from "../routes/wallet-terminal-social-route";
+import {
   __resetWalletTerminalTokenSafetyRouteForTests,
   __setWalletTerminalTokenSafetyFetchForTests,
   handleWalletTerminalTokenSafetyRoute,
 } from "../routes/wallet-terminal-token-safety-route";
 
 const routeClient = vi.hoisted(() => ({
-  fetch: async (path: string): Promise<unknown> => {
+  fetch: async (path: string, _init?: RequestInit): Promise<unknown> => {
     throw new Error(`route client not installed for ${path}`);
+  },
+  setTradePermissionMode: async (mode: string): Promise<unknown> => {
+    throw new Error(`trade permission not installed for ${mode}`);
   },
 }));
 
@@ -54,6 +87,11 @@ vi.mock("@elizaos/ui", () => {
       clear: () => globalThis.window.localStorage.clear(),
     },
     cn: (...values: unknown[]) => values.filter(Boolean).join(" "),
+    // jsdom never loads images, so the logo stays on its fallback monogram.
+    Avatar: (props: React.HTMLAttributes<HTMLSpanElement>) => h("span", props),
+    AvatarImage: () => null,
+    AvatarFallback: (props: React.HTMLAttributes<HTMLSpanElement>) =>
+      h("span", props),
     Button: ({
       variant: _variant,
       size: _size,
@@ -117,11 +155,14 @@ vi.mock("./components/InventoryAppView.tsx", () => ({
 }));
 
 import { CryptoTerminalView } from "./CryptoTerminalView";
+import { createPinLock } from "./terminal/pin-lock";
 import {
   OPERATING_MODE_STORAGE_KEY,
   PAPER_LEDGER_STORAGE_KEY,
+  PIN_LOCK_STORAGE_KEY,
   PRICE_ALERTS_STORAGE_KEY,
   TERMINAL_MARKETS_POLL_MS,
+  WATCHLIST_STORAGE_KEY,
 } from "./terminal/terminal-data";
 
 const recorded = JSON.parse(
@@ -144,7 +185,32 @@ const goplus = JSON.parse(
   ),
 ) as { mint: string; goplus: unknown };
 
+const lunarcrush = JSON.parse(
+  readFileSync(
+    resolve(
+      import.meta.dirname,
+      "../routes/__fixtures__/lunarcrush-coin.sample.json",
+    ),
+    "utf8",
+  ),
+) as { lunarcrush: { data: Record<string, unknown> } };
+
+const dexscreener = JSON.parse(
+  readFileSync(
+    resolve(
+      import.meta.dirname,
+      "../routes/__fixtures__/dexscreener-token-pairs.sample.json",
+    ),
+    "utf8",
+  ),
+) as { mint: string; dexscreener: Array<Record<string, unknown>> };
+
 let upstreamDown = false;
+/** DexScreener's answer for any mint in this file. */
+let pairsPayload: unknown = dexscreener.dexscreener;
+/** LUNARCRUSH_API_KEY the social route sees; null leaves it unset. */
+let socialKey: string | null = null;
+let galaxyScore = 62;
 let bitcoinPriceOverride: number | null = null;
 let routeCalls: string[] = [];
 
@@ -155,8 +221,68 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+let trade: TerminalTradeHarness | null = null;
+let exchange: TerminalExchangeHarness | null = null;
+// Lose the next execute answer after the server handled it.
+let loseNextExecuteAnswer = false;
+// Fail every order-list request.
+let failOrdersList = false;
+
+// Exchange calls go through the real wallet routes in the exchange harness,
+// sharing the trade harness's permission config.
+async function viaExchangeRoute(path: string, init?: RequestInit) {
+  if (!trade) throw new Error(`no trade harness for ${path}`);
+  exchange ??= createTerminalExchangeHarness({ config: trade.config });
+  const body =
+    typeof init?.body === "string"
+      ? (JSON.parse(init.body) as Record<string, unknown>)
+      : undefined;
+  routeCalls.push(path);
+  if (failOrdersList && path.endsWith("/exchange/orders")) {
+    throw new Error("Network error");
+  }
+  const res = await exchange.request(
+    init?.method === "POST" ? "POST" : "GET",
+    path,
+    body,
+  );
+  if (loseNextExecuteAnswer && path.endsWith("/exchange/execute")) {
+    loseNextExecuteAnswer = false;
+    throw new Error("Network error");
+  }
+  if (res.status !== 200) {
+    throw new Error(String(res.body.error ?? `HTTP ${res.status}`));
+  }
+  return res.body;
+}
+
+// Real-trade calls go through the real wallet routes in the trade harness.
+async function viaTradeRoute(path: string, init?: RequestInit) {
+  if (!trade) throw new Error(`no trade harness for ${path}`);
+  const body =
+    typeof init?.body === "string"
+      ? (JSON.parse(init.body) as Record<string, unknown>)
+      : undefined;
+  routeCalls.push(path);
+  const res = await trade.request(
+    init?.method === "POST" ? "POST" : "GET",
+    path,
+    body,
+  );
+  if (res.status !== 200) {
+    throw new Error(String(res.body.error ?? `HTTP ${res.status}`));
+  }
+  return res.body;
+}
+
 // Serve the view's client calls through the real route handler.
-async function viaRoute(path: string): Promise<unknown> {
+async function viaRoute(path: string, init?: RequestInit): Promise<unknown> {
+  if (path.startsWith("/api/wallet/terminal/trade/")) {
+    return viaTradeRoute(path, init);
+  }
+  if (path.startsWith("/api/wallet/terminal/exchange/")) {
+    return viaExchangeRoute(path, init);
+  }
   const res = {
     statusCode: 0,
     body: "",
@@ -177,10 +303,26 @@ async function viaRoute(path: string): Promise<unknown> {
     req,
     res as unknown as http.ServerResponse,
   );
-  if (!handled) {
-    await handleWalletTerminalTokenSafetyRoute(
+  const served =
+    handled ||
+    (await handleWalletTerminalTokenSafetyRoute(
       req,
       res as unknown as http.ServerResponse,
+    ));
+  const servedPairs =
+    served ||
+    (await handleWalletTerminalPairsRoute(
+      req,
+      res as unknown as http.ServerResponse,
+    ));
+  if (!servedPairs) {
+    await handleWalletTerminalSocialRoute(
+      req,
+      res as unknown as http.ServerResponse,
+      {
+        getSetting: (key: string) =>
+          key === "LUNARCRUSH_API_KEY" ? socialKey : null,
+      },
     );
   }
   const body = JSON.parse(res.body) as { error?: string };
@@ -192,9 +334,32 @@ async function viaRoute(path: string): Promise<unknown> {
 
 beforeEach(() => {
   upstreamDown = false;
+  socialKey = null;
+  galaxyScore = 62;
+  pairsPayload = dexscreener.dexscreener;
+  __setWalletTerminalPairsFetchForTests(async () => jsonResponse(pairsPayload));
+  __setWalletTerminalSocialFetchForTests(async () =>
+    jsonResponse({
+      ...lunarcrush.lunarcrush,
+      data: { ...lunarcrush.lunarcrush.data, galaxy_score: galaxyScore },
+    }),
+  );
   bitcoinPriceOverride = null;
   routeCalls = [];
+  trade = null;
+  exchange = null;
+  loseNextExecuteAnswer = false;
+  failOrdersList = false;
+  __resetTerminalTradesForTests();
+  __resetTerminalExchangeForTests();
   routeClient.fetch = viaRoute;
+  // Stand-in for the agent's PUT /api/permissions/trade-mode.
+  routeClient.setTradePermissionMode = async (mode: string) => {
+    if (!trade) throw new Error("no trade harness");
+    trade.config.features.tradePermissionMode =
+      mode as TerminalTradeHarness["config"]["features"]["tradePermissionMode"];
+    return { ok: true, tradePermissionMode: mode };
+  };
   __setWalletTerminalTokenSafetyFetchForTests(async () =>
     jsonResponse(goplus.goplus),
   );
@@ -235,6 +400,8 @@ afterEach(() => {
   vi.useRealTimers();
   __resetWalletTerminalMarketRouteForTests();
   __resetWalletTerminalTokenSafetyRouteForTests();
+  __resetWalletTerminalSocialRouteForTests();
+  __resetWalletTerminalPairsRouteForTests();
 });
 
 async function openBitcoin() {
@@ -447,6 +614,557 @@ describe("CryptoTerminalView", () => {
     expect(routeCalls).toContain(
       `/api/wallet/terminal/token-safety?mint=${goplus.mint}`,
     );
+    expect((await screen.findByText(/Add a LunarCrush key/)).textContent).toBe(
+      "Social: Add a LunarCrush key (LUNARCRUSH_API_KEY) to see social data.",
+    );
+    expect(routeCalls).toContain("/api/wallet/terminal/social?symbol=Bonk");
+    expect((await screen.findByText(/across 2 pools/)).textContent).toBe(
+      "Liquidity: $5.02M across 2 pools · $6.70M 24h volume · " +
+        `${Math.round((Date.now() - Date.parse("2023-01-01T00:00:00.000Z")) / 86_400_000)} d old · deepest on raydium vs SOL`,
+    );
+    expect(screen.queryByTestId("liquidity-row-caution")).toBeNull();
+    expect(routeCalls).toContain(
+      `/api/wallet/terminal/pairs?mint=${goplus.mint}`,
+    );
+  });
+
+  it("raises no major flags to caution for thin liquidity and says why", async () => {
+    const clean = goplus.goplus as {
+      result: Record<string, Record<string, unknown>>;
+    };
+    __setWalletTerminalTokenSafetyFetchForTests(async () =>
+      jsonResponse({
+        ...clean,
+        result: {
+          [goplus.mint]: {
+            ...clean.result[goplus.mint],
+            metadata_mutable: { status: "0" },
+            holders: [{ percent: "0.05" }],
+          },
+        },
+      }),
+    );
+    pairsPayload = [
+      { ...dexscreener.dexscreener[0], liquidity: { usd: 3_000 } },
+    ];
+    render(<CryptoTerminalView />);
+    fireEvent.click(screen.getByRole("button", { name: "Token safety" }));
+    fireEvent.change(screen.getByTestId("token-safety-mint"), {
+      target: { value: goplus.mint },
+    });
+    fireEvent.click(screen.getByTestId("token-safety-check"));
+    const caution = await screen.findByTestId("liquidity-row-caution");
+    expect(caution.textContent).toBe(
+      "Caution: liquidity is thin, so a trade will move the price. This adds caution and never clears a GoPlus flag.",
+    );
+    const verdict = screen.getByTestId("token-safety-verdict").textContent;
+    expect(verdict).toContain("Caution · Bonk");
+    expect(verdict).toContain(
+      "GoPlus found no major flags, but DexScreener shows thin or very new liquidity.",
+    );
+  });
+
+  it("shows a mint with no pool and an unavailable DexScreener as their own states", async () => {
+    pairsPayload = [];
+    render(<CryptoTerminalView />);
+    fireEvent.click(screen.getByRole("button", { name: "Token safety" }));
+    fireEvent.change(screen.getByTestId("token-safety-mint"), {
+      target: { value: goplus.mint },
+    });
+    fireEvent.click(screen.getByTestId("token-safety-check"));
+    expect(
+      (await screen.findByText(/No pool on DexScreener/)).textContent,
+    ).toBe("Liquidity: No pool on DexScreener. Treat it as untradeable.");
+
+    cleanup();
+    __resetWalletTerminalPairsRouteForTests();
+    __setWalletTerminalPairsFetchForTests(async () => jsonResponse({}, 500));
+    render(<CryptoTerminalView />);
+    fireEvent.click(screen.getByRole("button", { name: "Token safety" }));
+    fireEvent.change(screen.getByTestId("token-safety-mint"), {
+      target: { value: goplus.mint },
+    });
+    fireEvent.click(screen.getByTestId("token-safety-check"));
+    expect(
+      (await screen.findByText(/Unavailable: DexScreener/)).textContent,
+    ).toBe("Liquidity: Unavailable: DexScreener returned HTTP 500");
+  });
+
+  it("shows the LunarCrush Social row, and a low score raises no major flags to caution", async () => {
+    socialKey = "test-key";
+    const clean = goplus.goplus as {
+      result: Record<string, Record<string, unknown>>;
+    };
+    __setWalletTerminalTokenSafetyFetchForTests(async () =>
+      jsonResponse({
+        ...clean,
+        result: {
+          [goplus.mint]: {
+            ...clean.result[goplus.mint],
+            metadata_mutable: { status: "0" },
+            holders: [{ percent: "0.05" }],
+          },
+        },
+      }),
+    );
+    render(<CryptoTerminalView />);
+    fireEvent.click(screen.getByRole("button", { name: "Token safety" }));
+    fireEvent.change(screen.getByTestId("token-safety-mint"), {
+      target: { value: goplus.mint },
+    });
+    fireEvent.click(screen.getByTestId("token-safety-check"));
+    await screen.findByText(/Galaxy Score 62\/100/);
+    expect(screen.getByTestId("social-signal-text").textContent).toBe(
+      "Social: Galaxy Score 62/100 · AltRank #148 · 78% positive (LunarCrush matched Bonk, BONK)",
+    );
+    expect(screen.getByTestId("token-safety-verdict").textContent).toContain(
+      "No major flags",
+    );
+    expect(screen.queryByTestId("social-signal-caution")).toBeNull();
+
+    cleanup();
+    __resetWalletTerminalSocialRouteForTests();
+    galaxyScore = 12;
+    __setWalletTerminalSocialFetchForTests(async () =>
+      jsonResponse({
+        ...lunarcrush.lunarcrush,
+        data: { ...lunarcrush.lunarcrush.data, galaxy_score: galaxyScore },
+      }),
+    );
+    render(<CryptoTerminalView />);
+    fireEvent.click(screen.getByRole("button", { name: "Token safety" }));
+    fireEvent.change(screen.getByTestId("token-safety-mint"), {
+      target: { value: goplus.mint },
+    });
+    fireEvent.click(screen.getByTestId("token-safety-check"));
+    await screen.findByTestId("social-signal-caution");
+    const verdict = screen.getByTestId("token-safety-verdict").textContent;
+    expect(verdict).toContain("Caution · Bonk");
+    expect(verdict).toContain(
+      "GoPlus found no major flags, but LunarCrush shows weak social activity.",
+    );
+  });
+
+  describe("Real trade", () => {
+    // jsdom replaces the global Uint8Array, which breaks web3.js serialization
+    // of Node Buffers in the real routes; restore Node's for these tests.
+    const jsdomUint8Array = globalThis.Uint8Array;
+    beforeEach(() => {
+      globalThis.Uint8Array = Object.getPrototypeOf(Buffer.prototype)
+        .constructor as Uint8ArrayConstructor;
+    });
+    afterEach(() => {
+      globalThis.Uint8Array = jsdomUint8Array;
+    });
+
+    async function openRealTrade() {
+      fireEvent.click(screen.getByRole("button", { name: "Real trade" }));
+      return screen.findByTestId("real-trade-wallet");
+    }
+
+    async function reviewBuy(mint: string, amount = "0.25") {
+      fireEvent.change(screen.getByTestId("real-trade-mint"), {
+        target: { value: mint },
+      });
+      fireEvent.change(screen.getByTestId("real-trade-amount"), {
+        target: { value: amount },
+      });
+      fireEvent.click(screen.getByTestId("real-trade-review"));
+      return screen.findByTestId("real-trade-simulation");
+    }
+
+    it("turns real trading on only after a confirm, then sends a reviewed buy on tap", async () => {
+      trade = await createTerminalTradeHarness({ mode: "user-sign-only" });
+      render(<CryptoTerminalView />);
+      expect((await openRealTrade()).textContent).toContain(
+        "Trade permission: sign-only",
+      );
+      expect(screen.getByText("Real funds")).toBeTruthy();
+      expect(screen.getByTestId("real-trade-off")).toBeTruthy();
+      expect(screen.queryByTestId("real-trade-mint")).toBeNull();
+
+      fireEvent.click(screen.getByTestId("real-trade-enable"));
+      expect(trade.config.features.tradePermissionMode).toBe("user-sign-only");
+      fireEvent.click(screen.getByTestId("real-trade-enable-confirm"));
+      await screen.findByTestId("real-trade-mint");
+      expect(trade.config.features.tradePermissionMode).toBe(
+        "manual-local-key",
+      );
+
+      const simulation = await reviewBuy(trade.tokenMint);
+      expect(simulation.textContent).toBe("Passed · 61,250 compute units");
+      expect(screen.getByTestId("real-trade-pay").textContent).toBe("0.25 SOL");
+      expect(screen.getByTestId("real-trade-receive").textContent).toContain(
+        "2500 ",
+      );
+      expect(screen.getByTestId("real-trade-minimum").textContent).toContain(
+        "2475 ",
+      );
+      expect(screen.getByTestId("real-trade-fee").textContent).toBe(
+        "0.000005 SOL base + 0.00012 SOL priority",
+      );
+      expect(screen.getByTestId("real-trade-sending").textContent).toBe(
+        "Your Solana RPC. Sent through your Solana RPC with a capped priority fee.",
+      );
+      expect(screen.getByTestId("real-trade-expiry").textContent).toBe(
+        "Quote held for 60s.",
+      );
+      expect(trade.sent).toEqual([]);
+
+      fireEvent.click(screen.getByTestId("real-trade-confirm"));
+      const result = await screen.findByTestId("real-trade-result");
+      expect(result.textContent).toContain("Trade confirmed on Solana.");
+      expect(trade.sent).toHaveLength(1);
+      const link = result.querySelector("a");
+      expect(link?.getAttribute("href")).toMatch(
+        /^https:\/\/solscan\.io\/tx\/[1-9A-HJ-NP-Za-km-z]{64,88}$/,
+      );
+      expect(screen.queryByTestId("real-trade-confirm")).toBeNull();
+    });
+
+    it("places a reviewed Kraken limit order on tap and cancels it after asking", async () => {
+      trade = await createTerminalTradeHarness();
+      render(<CryptoTerminalView />);
+      await openRealTrade();
+      const panel = await screen.findByTestId("exchange-panel");
+      fireEvent.change(within(panel).getByTestId("exchange-quantity"), {
+        target: { value: "0.5" },
+      });
+      fireEvent.change(within(panel).getByTestId("exchange-price"), {
+        target: { value: "140.25" },
+      });
+      fireEvent.click(within(panel).getByTestId("exchange-review"));
+      expect(
+        (await screen.findByTestId("exchange-review-order")).textContent,
+      ).toBe("Buy 0.5 SOL at 140.25 USD (limit)");
+      expect(screen.getByTestId("exchange-review-value").textContent).toBe(
+        "70.125 USD",
+      );
+      expect(exchange?.orders).toHaveLength(0);
+
+      fireEvent.click(screen.getByTestId("exchange-confirm"));
+      const result = await screen.findByTestId("exchange-result");
+      expect(result.textContent).toContain(
+        `Placed · order ${exchange?.orders[0]?.orderId}`,
+      );
+      expect(exchange?.orders).toHaveLength(1);
+      fireEvent.click(screen.getByRole("button", { name: "Done" }));
+
+      const orders = await screen.findByTestId("exchange-orders");
+      expect(orders.textContent).toContain("Kraken · buy 0.5 SOLUSD at 140.25");
+      fireEvent.click(within(orders).getByTestId("exchange-order-cancel"));
+      expect(exchange?.orders[0]?.state).toBe("open");
+      fireEvent.click(await screen.findByTestId("exchange-cancel-confirm"));
+      await screen.findByText(/Canceled/);
+      expect(exchange?.orders[0]?.state).toBe("canceled");
+    });
+
+    it("shows a placed order whose answer was lost and asks for a fresh review", async () => {
+      trade = await createTerminalTradeHarness();
+      render(<CryptoTerminalView />);
+      await openRealTrade();
+      const panel = await screen.findByTestId("exchange-panel");
+      fireEvent.change(within(panel).getByTestId("exchange-quantity"), {
+        target: { value: "0.5" },
+      });
+      fireEvent.change(within(panel).getByTestId("exchange-price"), {
+        target: { value: "140.25" },
+      });
+      fireEvent.click(within(panel).getByTestId("exchange-review"));
+      await screen.findByTestId("exchange-review-order");
+      loseNextExecuteAnswer = true;
+      fireEvent.click(screen.getByTestId("exchange-confirm"));
+      expect(
+        (await screen.findByTestId("exchange-send-error")).textContent,
+      ).toContain("Check this session's orders below");
+      expect(screen.queryByTestId("exchange-confirm")).toBeNull();
+      expect(screen.getByTestId("exchange-review-again")).toBeTruthy();
+      expect(exchange?.orders).toHaveLength(1);
+      const orders = await screen.findByTestId("exchange-orders");
+      expect(orders.textContent).toContain("Kraken · buy 0.5 SOLUSD at 140.25");
+    });
+
+    it("says the order list failed to load instead of showing it empty", async () => {
+      trade = await createTerminalTradeHarness();
+      failOrdersList = true;
+      render(<CryptoTerminalView />);
+      await openRealTrade();
+      expect(
+        (await screen.findByTestId("exchange-orders-error")).textContent,
+      ).toContain("Couldn't load this session's exchange orders");
+      expect(screen.queryByTestId("exchange-orders-empty")).toBeNull();
+    });
+
+    it("names the settings a venue still needs instead of offering its ticket", async () => {
+      trade = await createTerminalTradeHarness();
+      exchange = createTerminalExchangeHarness({
+        config: trade.config,
+        settings: { OKX_API_KEY: "", OKX_API_SECRET: "" },
+      });
+      render(<CryptoTerminalView />);
+      await openRealTrade();
+      const panel = await screen.findByTestId("exchange-panel");
+      await within(panel).findByTestId("exchange-quantity");
+      fireEvent.click(within(panel).getByRole("button", { name: "OKX" }));
+      expect(within(panel).getByTestId("exchange-missing").textContent).toBe(
+        "Set OKX_API_KEY, OKX_API_SECRET in packages/agent/.env to trade on OKX.",
+      );
+      expect(
+        (within(panel).getByTestId("exchange-review") as HTMLButtonElement)
+          .disabled,
+      ).toBe(true);
+    });
+
+    it("sends a buy privately through Jito when that route is picked", async () => {
+      trade = await createTerminalTradeHarness();
+      render(<CryptoTerminalView />);
+      await openRealTrade();
+      expect(screen.getByTestId("real-trade-route-note").textContent).toBe(
+        "Uses your Solana RPC with a capped priority fee.",
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Jito (private)" }));
+      expect(screen.getByTestId("real-trade-route-note").textContent).toBe(
+        "Skips the public mempool, which blocks sandwich bots. Adds a 0.0001 SOL tip.",
+      );
+
+      await reviewBuy(trade.tokenMint);
+      expect(screen.getByTestId("real-trade-fee").textContent).toBe(
+        "0.000005 SOL base + 0.0001 SOL Jito tip",
+      );
+      expect(screen.getByTestId("real-trade-sending").textContent).toContain(
+        "Jito. Sent only to Jito's block engine as a bundle",
+      );
+      fireEvent.click(screen.getByTestId("real-trade-confirm"));
+      const result = await screen.findByTestId("real-trade-result");
+      expect(result.textContent).toContain("Trade confirmed on Solana.");
+      expect(trade.sent).toEqual([]);
+      expect(trade.jitoSends).toHaveLength(1);
+    });
+
+    it("shows a refused buy and never sends a failed simulation", async () => {
+      trade = await createTerminalTradeHarness();
+      render(<CryptoTerminalView />);
+      await openRealTrade();
+
+      fireEvent.change(screen.getByTestId("real-trade-mint"), {
+        target: { value: trade.tokenMint },
+      });
+      fireEvent.change(screen.getByTestId("real-trade-amount"), {
+        target: { value: "3" },
+      });
+      fireEvent.click(screen.getByTestId("real-trade-review"));
+      expect((await screen.findByRole("alert")).textContent).toMatch(
+        /over the 1 SOL per-trade limit/,
+      );
+      expect(screen.queryByRole("dialog")).toBeNull();
+
+      trade.simulationErr = { InstructionError: [2, { Custom: 1 }] };
+      const simulation = await reviewBuy(trade.tokenMint);
+      expect(simulation.textContent).toContain("Failed:");
+      expect(
+        (screen.getByTestId("real-trade-confirm") as HTMLButtonElement)
+          .disabled,
+      ).toBe(true);
+      expect(trade.sent).toEqual([]);
+    });
+
+    it("lets a quote expire and asks for a fresh review", async () => {
+      trade = await createTerminalTradeHarness();
+      render(<CryptoTerminalView />);
+      await openRealTrade();
+      vi.useFakeTimers({
+        toFake: ["setInterval", "clearInterval", "Date"],
+        now: Date.now(),
+      });
+      await reviewBuy(trade.tokenMint);
+      act(() => {
+        vi.advanceTimersByTime(61_000);
+      });
+      expect(screen.queryByTestId("real-trade-confirm")).toBeNull();
+      expect(screen.getByRole("dialog").textContent).toContain(
+        "This quote expired.",
+      );
+      fireEvent.click(screen.getByTestId("real-trade-review-again"));
+      expect((await screen.findByTestId("real-trade-expiry")).textContent).toBe(
+        "Quote held for 60s.",
+      );
+      expect(
+        trade.jupiterCalls.filter((url) => url.endsWith("/swap")),
+      ).toHaveLength(2);
+      expect(trade.sent).toEqual([]);
+    });
+
+    it("carries a checked mint from Token safety into the ticket and its review", async () => {
+      trade = await createTerminalTradeHarness({ tokenMint: goplus.mint });
+      render(<CryptoTerminalView />);
+      fireEvent.click(screen.getByRole("button", { name: "Token safety" }));
+      fireEvent.change(screen.getByTestId("token-safety-mint"), {
+        target: { value: goplus.mint },
+      });
+      fireEvent.click(screen.getByTestId("token-safety-check"));
+      fireEvent.click(await screen.findByTestId("token-safety-trade"));
+
+      const mint = (await screen.findByTestId(
+        "real-trade-mint",
+      )) as HTMLInputElement;
+      expect(mint.value).toBe(goplus.mint);
+      fireEvent.change(screen.getByTestId("real-trade-amount"), {
+        target: { value: "0.1" },
+      });
+      socialKey = "test-key";
+      fireEvent.click(screen.getByTestId("real-trade-review"));
+      expect(
+        (await screen.findByText(/Caution: GoPlus reported risks/)).textContent,
+      ).toContain("Caution");
+      const dialog = screen.getByRole("dialog");
+      expect(
+        (await within(dialog).findByText(/Galaxy Score 62\/100/)).textContent,
+      ).toContain("AltRank #148");
+    });
+
+    it("explains a wallet that can't sign instead of offering a ticket", async () => {
+      trade = await createTerminalTradeHarness({ solanaSigner: false });
+      render(<CryptoTerminalView />);
+      await openRealTrade();
+      expect(screen.getByRole("alert").textContent).toBe(
+        "This wallet can't place trades: This wallet can't sign Solana transactions here.",
+      );
+      expect(screen.queryByTestId("real-trade-mint")).toBeNull();
+    });
+
+    describe("with Phantom", () => {
+      type FakePhantom = {
+        isPhantom: true;
+        publicKey: PublicKey | null;
+        signed: VersionedTransaction[];
+        decline: boolean;
+        connect: () => Promise<{ publicKey: PublicKey }>;
+        disconnect: () => Promise<void>;
+        signTransaction: (
+          transaction: VersionedTransaction,
+        ) => Promise<VersionedTransaction>;
+      };
+
+      // Phantom's extension is the one stand-in: a provider with Phantom's
+      // injected API that signs with a generated key, as the popup would on
+      // approve.
+      function installPhantom(owner: Keypair): FakePhantom {
+        const provider: FakePhantom = {
+          isPhantom: true,
+          publicKey: null,
+          signed: [],
+          decline: false,
+          connect: async () => {
+            provider.publicKey = owner.publicKey;
+            return { publicKey: owner.publicKey };
+          },
+          disconnect: async () => {
+            provider.publicKey = null;
+          },
+          signTransaction: async (transaction) => {
+            if (provider.decline) {
+              throw Object.assign(new Error("User rejected the request."), {
+                code: 4001,
+              });
+            }
+            transaction.sign([owner]);
+            provider.signed.push(transaction);
+            return transaction;
+          },
+        };
+        (window as unknown as { phantom?: unknown }).phantom = {
+          solana: provider,
+        };
+        return provider;
+      }
+
+      afterEach(() => {
+        delete (window as unknown as { phantom?: unknown }).phantom;
+      });
+
+      async function connectPhantom() {
+        fireEvent.click(screen.getByRole("button", { name: "Real trade" }));
+        fireEvent.click(await screen.findByTestId("phantom-connect"));
+        return screen.findByTestId("phantom-account");
+      }
+
+      it("signs a reviewed buy in Phantom in sign-only mode and sends exactly what it signed", async () => {
+        trade = await createTerminalTradeHarness({ mode: "user-sign-only" });
+        const owner = Keypair.generate();
+        trade.swapPayer = owner.publicKey;
+        const phantom = installPhantom(owner);
+        render(<CryptoTerminalView />);
+        const account = await connectPhantom();
+        const address = owner.publicKey.toBase58();
+        expect(account.textContent).toBe(
+          `Phantom ${address.slice(0, 4)}…${address.slice(-4)}`,
+        );
+
+        await reviewBuy(trade.tokenMint);
+        expect(screen.getByTestId("real-trade-signer").textContent).toBe(
+          "Phantom",
+        );
+        expect(screen.getByRole("dialog").textContent).toContain(address);
+        expect(screen.getByTestId("real-trade-confirm").textContent).toBe(
+          "Confirm and sign in Phantom",
+        );
+        expect(phantom.signed).toEqual([]);
+
+        fireEvent.click(screen.getByTestId("real-trade-confirm"));
+        const result = await screen.findByTestId("real-trade-result");
+        expect(result.textContent).toContain("Trade confirmed on Solana.");
+        expect(phantom.signed).toHaveLength(1);
+        expect(trade.sent).toHaveLength(1);
+        const sent = VersionedTransaction.deserialize(
+          trade.sent[0] as Uint8Array,
+        );
+        expect(Buffer.from(sent.message.serialize())).toEqual(
+          Buffer.from(
+            (trade.built[0] as VersionedTransaction).message.serialize(),
+          ),
+        );
+        expect(
+          nacl.sign.detached.verify(
+            sent.message.serialize(),
+            sent.signatures[0] as Uint8Array,
+            owner.publicKey.toBytes(),
+          ),
+        ).toBe(true);
+        expect(trade.config.features.tradePermissionMode).toBe(
+          "user-sign-only",
+        );
+      });
+
+      it("sends nothing when the trade is declined in Phantom", async () => {
+        trade = await createTerminalTradeHarness({ mode: "user-sign-only" });
+        const owner = Keypair.generate();
+        trade.swapPayer = owner.publicKey;
+        const phantom = installPhantom(owner);
+        phantom.decline = true;
+        render(<CryptoTerminalView />);
+        await connectPhantom();
+        await reviewBuy(trade.tokenMint);
+        fireEvent.click(screen.getByTestId("real-trade-confirm"));
+        expect(
+          (await within(screen.getByRole("dialog")).findByRole("alert"))
+            .textContent,
+        ).toBe("You declined the signature in Phantom.");
+        expect(screen.queryByTestId("real-trade-result")).toBeNull();
+        expect(trade.sent).toEqual([]);
+      });
+
+      it("says Phantom isn't installed and leaves the agent wallet as the default", async () => {
+        trade = await createTerminalTradeHarness();
+        render(<CryptoTerminalView />);
+        await openRealTrade();
+        expect(screen.getByTestId("real-trade-mint")).toBeTruthy();
+        fireEvent.click(screen.getByRole("button", { name: "Phantom" }));
+        expect(screen.getByTestId("phantom-missing").textContent).toContain(
+          "Phantom isn't installed in this browser.",
+        );
+        expect(screen.queryByTestId("real-trade-mint")).toBeNull();
+      });
+    });
   });
 
   it("sets a price alert, refuses one already met, and fires on a later live price", async () => {
@@ -548,5 +1266,161 @@ describe("CryptoTerminalView", () => {
     expect(
       (await screen.findByTestId("price-alerts-fired")).textContent,
     ).toContain("BTC rose above $60,000.00 (now $65,757.00)");
+  });
+
+  describe("PIN lock", () => {
+    const PIN = "2580";
+
+    const seedAlert = (targetUsd: number) =>
+      window.localStorage.setItem(
+        PRICE_ALERTS_STORAGE_KEY,
+        JSON.stringify({
+          version: 1,
+          alerts: [
+            {
+              id: "seeded",
+              assetId: "bitcoin",
+              symbol: "BTC",
+              direction: "above",
+              targetUsd,
+              createdAt: 1,
+              triggeredAt: null,
+              triggeredPriceUsd: null,
+            },
+          ],
+        }),
+      );
+
+    async function seedPin(autoLockMinutes: 5 | 15 | 30 = 15) {
+      const created = await createPinLock(PIN, autoLockMinutes, 1_000);
+      if (!created.ok) throw new Error(created.reason);
+      window.localStorage.setItem(
+        PIN_LOCK_STORAGE_KEY,
+        JSON.stringify(created.record),
+      );
+    }
+
+    async function enterPin(pin: string) {
+      fireEvent.change(screen.getByTestId("terminal-pin-input"), {
+        target: { value: pin },
+      });
+      fireEvent.click(screen.getByTestId("terminal-pin-unlock"));
+    }
+
+    it("sets a PIN, locks, refuses a wrong PIN, and unlocks with the right one", async () => {
+      render(<CryptoTerminalView />);
+      await screen.findByTestId("terminal-market-row-bitcoin");
+      fireEvent.click(screen.getByTestId("terminal-pin-settings"));
+      fireEvent.change(screen.getByTestId("terminal-pin-new"), {
+        target: { value: PIN },
+      });
+      fireEvent.change(screen.getByTestId("terminal-pin-confirm"), {
+        target: { value: "2581" },
+      });
+      fireEvent.click(screen.getByTestId("terminal-pin-save"));
+      expect(screen.getByRole("alert").textContent).toBe(
+        "The two new PINs don't match.",
+      );
+      fireEvent.change(screen.getByTestId("terminal-pin-confirm"), {
+        target: { value: PIN },
+      });
+      fireEvent.click(screen.getByTestId("terminal-pin-save"));
+      await screen.findByTestId("terminal-lock-now");
+      expect(screen.queryByRole("dialog")).toBeNull();
+      const stored = window.localStorage.getItem(PIN_LOCK_STORAGE_KEY) ?? "";
+      expect(JSON.parse(stored)).toMatchObject({ version: 1, failures: 0 });
+      expect(stored).not.toContain(PIN);
+
+      fireEvent.click(screen.getByRole("button", { name: "Wallet" }));
+      fireEvent.click(screen.getByTestId("terminal-lock-now"));
+      expect(screen.getByTestId("terminal-lock-screen")).toBeTruthy();
+      expect(screen.queryByText("Crypto Terminal")).toBeNull();
+      expect(screen.queryByTestId("wallet-rich-dashboard")).toBeNull();
+
+      await enterPin("1111");
+      expect((await screen.findByRole("alert")).textContent).toBe(
+        "Wrong PIN. 4 more tries before a short wait.",
+      );
+      expect(screen.getByTestId("terminal-lock-screen")).toBeTruthy();
+
+      await enterPin(PIN);
+      await screen.findByTestId("wallet-rich-dashboard");
+      expect(screen.queryByTestId("terminal-lock-screen")).toBeNull();
+    });
+
+    it("starts locked from a saved PIN, keeps checking alerts, and locks again when idle", async () => {
+      await seedPin(5);
+      seedAlert(60_000);
+      vi.useFakeTimers({
+        toFake: ["setInterval", "clearInterval", "Date"],
+        now: Date.now(),
+      });
+      render(<CryptoTerminalView />);
+      expect(screen.getByTestId("terminal-lock-screen")).toBeTruthy();
+      expect(
+        (await screen.findByTestId("terminal-lock-alerts")).textContent,
+      ).toBe("1 price alert fired while locked. Unlock to see it.");
+      expect(screen.queryByText(/BTC rose above/)).toBeNull();
+
+      await enterPin(PIN);
+      expect(
+        (await screen.findByTestId("price-alerts-fired")).textContent,
+      ).toContain("BTC rose above $60,000.00 (now $65,757.00)");
+
+      act(() => {
+        vi.advanceTimersByTime(4 * 60_000);
+      });
+      fireEvent.keyDown(window, { key: "Shift" });
+      act(() => {
+        vi.advanceTimersByTime(4 * 60_000);
+      });
+      expect(screen.queryByTestId("terminal-lock-screen")).toBeNull();
+      act(() => {
+        vi.advanceTimersByTime(60_000 + TERMINAL_MARKETS_POLL_MS);
+      });
+      expect(screen.getByTestId("terminal-lock-screen")).toBeTruthy();
+    });
+
+    it("resets every saved terminal record when the PIN is forgotten", async () => {
+      await seedPin();
+      seedAlert(70_000);
+      window.localStorage.setItem(WATCHLIST_STORAGE_KEY, '["tether"]');
+      window.localStorage.setItem(
+        OPERATING_MODE_STORAGE_KEY,
+        JSON.stringify({ mode: "hunt", history: [] }),
+      );
+      render(<CryptoTerminalView />);
+      fireEvent.click(screen.getByTestId("terminal-pin-forgot"));
+      const dialog = screen.getByRole("dialog");
+      expect(dialog.textContent).toMatch(/real wallet and its keys are not/);
+      fireEvent.click(within(dialog).getByTestId("terminal-pin-reset-confirm"));
+
+      await screen.findByTestId("terminal-market-row-bitcoin");
+      expect(screen.queryByTestId("terminal-lock-screen")).toBeNull();
+      expect(screen.getByTestId("terminal-pin-settings").textContent).toBe(
+        "Set PIN",
+      );
+      expect(screen.getByTestId("terminal-mode-status").textContent).toBe(
+        "SLEEP",
+      );
+      for (const key of [
+        PIN_LOCK_STORAGE_KEY,
+        PRICE_ALERTS_STORAGE_KEY,
+        WATCHLIST_STORAGE_KEY,
+        OPERATING_MODE_STORAGE_KEY,
+      ]) {
+        expect(window.localStorage.getItem(key)).toBeNull();
+      }
+    });
+
+    it("stays locked when the saved PIN cannot be read", async () => {
+      window.localStorage.setItem(PIN_LOCK_STORAGE_KEY, "{broken");
+      render(<CryptoTerminalView />);
+      expect(screen.getByRole("alert").textContent).toMatch(
+        /not valid JSON, so the terminal can't check your PIN/,
+      );
+      expect(screen.queryByTestId("terminal-pin-input")).toBeNull();
+      expect(screen.queryByText("Crypto Terminal")).toBeNull();
+    });
   });
 });

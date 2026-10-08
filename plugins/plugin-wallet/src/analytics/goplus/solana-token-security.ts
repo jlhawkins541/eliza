@@ -17,7 +17,7 @@ import type {
   WalletTokenSafetyVerdict,
 } from "../../contracts.js";
 
-const GOPLUS_SOLANA_URL =
+export const GOPLUS_SOLANA_URL =
   "https://api.gopluslabs.io/api/v1/solana/token_security";
 const GOPLUS_PROVIDER = {
   providerId: "goplus",

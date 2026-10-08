@@ -1,18 +1,24 @@
 /**
  * The crypto terminal: live market browsing, watchlist, per-asset price
  * history, a paper order ticket, a paper portfolio, price alerts, a Solana
- * token safety check, and the HUNT / SLEEP / OFF operating mode, alongside the
- * real wallet dashboard.
+ * token safety check, a Real trade tab, the HUNT / SLEEP / OFF operating mode,
+ * and an optional PIN lock, alongside the real wallet dashboard.
  *
  * Prices and history come from the plugin's read-only terminal routes and are
  * never fabricated: while they load or fail, the view says so and the order
- * ticket stays disabled. Every order here is a paper order applied to a local
- * practice ledger; the terminal never signs or submits a transaction, in any
- * mode. A mode changes only after the user confirms it, and OFF stops every
- * automatic market request. Real
- * balances stay in {@link InventoryAppView}, which owns the wallet pipeline.
+ * ticket stays disabled. Orders in the market tabs are paper orders applied to
+ * a local practice ledger. Real trades live only in {@link RealTradePanel},
+ * where each one is simulated by the server and sent only after the person
+ * confirms it; no mode or alert ever trades. A mode changes only after the
+ * user confirms it, and OFF stops every automatic market request. While
+ * locked, the session keeps polling and checking alerts but renders only the
+ * lock screen, wallet and trade tabs included. Real balances stay in
+ * {@link InventoryAppView}, which owns the wallet pipeline.
  */
 import {
+  Avatar,
+  AvatarFallback,
+  AvatarImage,
   Button,
   Dialog,
   DialogContent,
@@ -35,7 +41,7 @@ import {
   X,
 } from "lucide-react";
 import * as React from "react";
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type {
   WalletTerminalChartDays,
   WalletTerminalMarket,
@@ -48,6 +54,7 @@ import {
   formatTerminalUnits,
   formatTerminalUsd,
 } from "./terminal/format.ts";
+import { LiquidityRow } from "./terminal/LiquidityRow.tsx";
 import {
   OPERATING_MODES,
   type OperatingModeChange,
@@ -75,15 +82,22 @@ import {
   type PriceAlertDirection,
   type PriceAlertRejection,
 } from "./terminal/price-alerts.ts";
+import { RealTradePanel } from "./terminal/RealTradePanel.tsx";
+import { SocialSignalRow } from "./terminal/SocialSignalRow.tsx";
+import { PinControls, TerminalLockScreen } from "./terminal/TerminalLock.tsx";
 import {
   type PaperLedgerState,
+  type PinLockHandle,
   type PriceAlertsHandle,
   type TerminalMarketsState,
   useOperatingMode,
   usePaperLedger,
+  usePinLock,
   usePriceAlerts,
+  useSocialSignal,
   useTerminalChart,
   useTerminalMarkets,
+  useTokenPairs,
   useTokenSafety,
   useWatchlist,
 } from "./terminal/terminal-data.ts";
@@ -95,6 +109,7 @@ type TerminalSection =
   | "watchlist"
   | "portfolio"
   | "safety"
+  | "trade"
   | "wallet";
 
 const SECTIONS: Array<{ value: TerminalSection; label: string }> = [
@@ -102,6 +117,7 @@ const SECTIONS: Array<{ value: TerminalSection; label: string }> = [
   { value: "watchlist", label: "Watchlist" },
   { value: "portfolio", label: "Paper portfolio" },
   { value: "safety", label: "Token safety" },
+  { value: "trade", label: "Real trade" },
   { value: "wallet", label: "Wallet" },
 ];
 
@@ -126,22 +142,17 @@ function changeTone(pct: number): string {
 }
 
 function AssetMark({ market }: { market: WalletTerminalMarket }) {
-  const [imageFailed, setImageFailed] = useState(false);
-  return market.imageUrl && !imageFailed ? (
-    <img
-      src={market.imageUrl}
-      alt=""
-      className="size-8 shrink-0 rounded-full"
-      loading="lazy"
-      onError={() => setImageFailed(true)}
-    />
-  ) : (
-    <span
-      aria-hidden="true"
-      className="grid size-8 shrink-0 place-items-center rounded-full bg-surface text-[0.6rem] font-semibold text-txt"
-    >
-      {market.symbol.slice(0, 4)}
-    </span>
+  // The Avatar atom swaps in the symbol monogram until the logo loads, and
+  // keeps it when the logo is missing or fails.
+  return (
+    <Avatar aria-hidden="true">
+      {market.imageUrl ? (
+        <AvatarImage src={market.imageUrl} alt="" loading="lazy" />
+      ) : null}
+      <AvatarFallback style={{ fontSize: "0.6rem" }} className="font-semibold">
+        {market.symbol.slice(0, 4)}
+      </AvatarFallback>
+    </Avatar>
   );
 }
 
@@ -310,17 +321,19 @@ function ScoutPanel({
         <ul className="flex flex-wrap gap-2">
           {picks.map((market) => (
             <li key={market.id}>
-              <button
+              <Button
                 type="button"
+                variant="outlineMuted"
+                size="sm"
                 onClick={() => onOpen(market.id)}
-                className="rounded-md border border-border/70 bg-bg px-2.5 py-1.5 text-left text-xs hover:bg-bg-hover"
+                className="h-auto px-2.5 py-1.5 text-left text-xs"
                 data-testid={`terminal-scout-${market.id}`}
               >
                 <span className="font-medium text-txt">{market.symbol}</span>{" "}
                 <span className={changeTone(market.change24hPct)}>
                   {formatTerminalChange(market.change24hPct)}
                 </span>
-              </button>
+              </Button>
             </li>
           ))}
         </ul>
@@ -354,6 +367,29 @@ const VERDICT_COPY: Record<
   },
 };
 
+/**
+ * GoPlus's verdict, raised to caution when the social signal or the token's
+ * liquidity adds one. Neither may lower a verdict GoPlus already gave.
+ */
+function shownVerdict(
+  verdict: WalletTokenSafetyVerdict,
+  addedCaution: boolean,
+): WalletTokenSafetyVerdict {
+  return addedCaution && verdict === "no-major-flags" ? "caution" : verdict;
+}
+
+/** Why a "no major flags" verdict is shown as caution. */
+function raisedVerdictDetail(
+  socialCaution: boolean,
+  liquidityCaution: boolean,
+): string {
+  const reasons: string[] = [];
+  if (liquidityCaution)
+    reasons.push("DexScreener shows thin or very new liquidity");
+  if (socialCaution) reasons.push("LunarCrush shows weak social activity");
+  return `GoPlus found no major flags, but ${reasons.join(" and ")}.`;
+}
+
 const SEVERITY_TONE: Record<WalletTokenSafetySeverity, string> = {
   danger: "text-danger",
   warn: "text-warn",
@@ -370,10 +406,35 @@ const SEVERITY_LABEL: Record<WalletTokenSafetySeverity, string> = {
 
 const SOLANA_MINT_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
-function TokenSafetyPanel() {
+function TokenSafetyPanel({ onTrade }: { onTrade: (mint: string) => void }) {
   const [mint, setMint] = useState("");
   const [touched, setTouched] = useState(false);
   const { state, check } = useTokenSafety();
+  const social = useSocialSignal();
+  const pairs = useTokenPairs();
+  const reportMint = state.status === "ready" ? state.data.mint : null;
+  const reportSymbol = state.status === "ready" ? state.data.symbol : null;
+  const { check: checkSocial, clear: clearSocial } = social;
+  useEffect(() => {
+    if (reportMint !== null && reportSymbol !== null) checkSocial(reportSymbol);
+    else clearSocial();
+  }, [reportMint, reportSymbol, checkSocial, clearSocial]);
+  const { check: checkPairs, clear: clearPairs } = pairs;
+  useEffect(() => {
+    if (reportMint !== null) checkPairs(reportMint);
+    else clearPairs();
+  }, [reportMint, checkPairs, clearPairs]);
+  // A low Galaxy Score can raise "no major flags" to caution, never lower a verdict.
+  const socialCaution =
+    social.state.status === "ready" &&
+    social.state.data.status === "tracked" &&
+    social.state.data.addsCaution;
+  // Thin or day-old liquidity raises it the same way, and never lowers it.
+  const liquidityCaution =
+    pairs.state.status === "ready" &&
+    pairs.state.data.status === "found" &&
+    pairs.state.data.addsCaution;
+  const addedCaution = socialCaution || liquidityCaution;
   const inputId = useId();
   const trimmed = mint.trim();
   const valid = SOLANA_MINT_PATTERN.test(trimmed);
@@ -435,15 +496,22 @@ function TokenSafetyPanel() {
           <div
             className={cn(
               "rounded-md border px-4 py-3",
-              VERDICT_COPY[state.data.verdict].tone,
+              VERDICT_COPY[shownVerdict(state.data.verdict, addedCaution)].tone,
             )}
+            data-testid="token-safety-verdict"
           >
             <h2 id="token-safety-title" className="text-base font-semibold">
-              {VERDICT_COPY[state.data.verdict].label}
+              {
+                VERDICT_COPY[shownVerdict(state.data.verdict, addedCaution)]
+                  .label
+              }
               {state.data.symbol ? ` · ${state.data.symbol}` : ""}
             </h2>
             <p className="text-xs text-txt">
-              {VERDICT_COPY[state.data.verdict].detail}
+              {shownVerdict(state.data.verdict, addedCaution) !==
+              state.data.verdict
+                ? raisedVerdictDetail(socialCaution, liquidityCaution)
+                : VERDICT_COPY[state.data.verdict].detail}
             </p>
           </div>
           <ul className="divide-y divide-border/70 rounded-md border border-border/70">
@@ -469,6 +537,8 @@ function TokenSafetyPanel() {
               </li>
             ))}
           </ul>
+          <LiquidityRow state={pairs.state} mint={reportMint} />
+          <SocialSignalRow state={social.state} symbol={reportSymbol} />
           <p
             className={cn(
               "text-xs",
@@ -482,6 +552,15 @@ function TokenSafetyPanel() {
               ? ` · ${state.data.holderCount.toLocaleString("en-US")} holders`
               : ""}
           </p>
+          <Button
+            variant="outline"
+            size="sm"
+            className="self-start"
+            onClick={() => onTrade(state.data.mint)}
+            data-testid="token-safety-trade"
+          >
+            Trade this token
+          </Button>
         </section>
       ) : (
         <p className="rounded-md border border-border/70 px-4 py-8 text-center text-sm text-muted">
@@ -583,10 +662,11 @@ function MarketList({
             const watched = watchlist.has(market.id);
             return (
               <li key={market.id} className="flex items-center gap-2 pr-2">
-                <button
+                <Button
                   type="button"
+                  variant="searchResult"
                   onClick={() => onOpen(market.id)}
-                  className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left hover:bg-bg-hover"
+                  className="h-auto min-w-0 flex-1 justify-start gap-3 whitespace-normal px-3 py-2.5 text-left"
                   data-testid={`terminal-market-row-${market.id}`}
                 >
                   <AssetMark market={market} />
@@ -611,7 +691,7 @@ function MarketList({
                       {formatTerminalChange(market.change24hPct)}
                     </span>
                   </span>
-                </button>
+                </Button>
                 <Button
                   variant="ghost"
                   size="icon-sm"
@@ -1022,14 +1102,15 @@ function AlertList({
             key={alert.id}
             className="flex items-center justify-between gap-3 px-3 py-2 text-sm"
           >
-            <button
+            <Button
               type="button"
-              className="text-left text-txt hover:underline"
+              variant="publicLink"
+              className="text-left text-sm"
               onClick={() => onOpen(alert.assetId)}
             >
               {alert.symbol} {alert.direction === "above" ? "above" : "below"}{" "}
               {formatTerminalUsd(alert.targetUsd)}
-            </button>
+            </Button>
             <span className="flex items-center gap-2">
               <span
                 className={cn(
@@ -1228,11 +1309,12 @@ function PaperPortfolio({
               const market = marketsById.get(position.assetId);
               return (
                 <li key={position.assetId}>
-                  <button
+                  <Button
                     type="button"
+                    variant="searchResult"
                     disabled={!market}
                     onClick={() => onOpen(position.assetId)}
-                    className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left hover:bg-bg-hover disabled:hover:bg-transparent"
+                    className="h-auto w-full justify-between gap-3 whitespace-normal px-3 py-2.5 text-left"
                   >
                     <span>
                       <span className="block text-sm font-medium text-txt">
@@ -1247,7 +1329,7 @@ function PaperPortfolio({
                         ? "Price unavailable"
                         : formatTerminalUsd(position.valueUsd)}
                     </span>
-                  </button>
+                  </Button>
                 </li>
               );
             })}
@@ -1358,8 +1440,14 @@ function PaperPortfolio({
 }
 
 export function CryptoTerminalView() {
+  const lock = usePinLock();
+  return <TerminalSession key={lock.generation} lock={lock} />;
+}
+
+function TerminalSession({ lock }: { lock: PinLockHandle }) {
   const [section, setSection] = useState<TerminalSection>("markets");
   const [assetId, setAssetId] = useState<string | null>(null);
+  const [tradeMint, setTradeMint] = useState<string | null>(null);
   const mode = useOperatingMode();
   const { state: marketsState, refresh: refreshMarkets } = useTerminalMarkets(
     pollsMarkets(mode.mode),
@@ -1382,17 +1470,46 @@ export function CryptoTerminalView() {
   const alertsPaused = !alertsActive(mode.mode);
   const alerts = usePriceAlerts(prices, !alertsPaused);
   const selected = assetId ? marketsById.get(assetId) : undefined;
+  const tabsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    // On narrow screens the tab strip scrolls; keep the open section in view.
+    // jsdom has no scrollIntoView, so it is called only where it exists.
+    const index = SECTIONS.findIndex((item) => item.value === section);
+    const active =
+      tabsRef.current?.querySelectorAll<HTMLElement>('[role="tab"]')[index];
+    if (active && typeof active.scrollIntoView === "function") {
+      active.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+  }, [section]);
 
   const open = (id: string) => {
     setAssetId(id);
     if (section === "wallet") setSection("markets");
   };
 
+  if (lock.status === "locked") {
+    return (
+      <Escape>
+        <TerminalLockScreen lock={lock} firedAlertCount={alerts.fired.length} />
+      </Escape>
+    );
+  }
+
   let body: React.ReactNode;
   if (section === "wallet") {
     body = <InventoryAppView />;
   } else if (section === "safety") {
-    body = <TokenSafetyPanel />;
+    body = (
+      <TokenSafetyPanel
+        onTrade={(mint) => {
+          setTradeMint(mint);
+          setSection("trade");
+        }}
+      />
+    );
+  } else if (section === "trade") {
+    body = <RealTradePanel key={tradeMint ?? ""} initialMint={tradeMint} />;
   } else if (marketsState.status === "idle" && section !== "portfolio") {
     body = (
       <p className="rounded-md border border-border/70 px-4 py-8 text-center text-sm text-muted">
@@ -1472,32 +1589,46 @@ export function CryptoTerminalView() {
                 Crypto Terminal
               </h1>
               <p className="text-xs text-muted">
-                Live markets with paper trading. Orders here never touch your
-                wallet.
+                Live markets with paper trading. Only the Real trade tab uses
+                your wallet, after you confirm each trade.
               </p>
             </div>
-            <span className="rounded-full border border-border px-2.5 py-1 text-[0.68rem] font-medium uppercase tracking-[0.12em] text-muted">
-              Paper trading
-            </span>
+            <div className="flex items-center gap-2">
+              <PinControls lock={lock} />
+              <span
+                className={cn(
+                  "rounded-full border px-2.5 py-1 text-[0.68rem] font-medium uppercase tracking-[0.12em]",
+                  section === "trade"
+                    ? "border-warn/60 text-warn"
+                    : "border-border text-muted",
+                )}
+              >
+                {section === "trade" ? "Real funds" : "Paper trading"}
+              </span>
+            </div>
           </div>
-          <SegmentedControl
-            role="tablist"
-            value={section}
-            onValueChange={(next) => {
-              setSection(next);
-              setAssetId(null);
-            }}
-            items={SECTIONS}
-            aria-label="Terminal sections"
-            className="max-w-full overflow-x-auto"
-          />
+          <div ref={tabsRef} className="min-w-0">
+            <SegmentedControl
+              role="tablist"
+              value={section}
+              onValueChange={(next) => {
+                setSection(next);
+                setAssetId(null);
+              }}
+              items={SECTIONS}
+              aria-label="Terminal sections"
+              className="max-w-full overflow-x-auto"
+            />
+          </div>
           <ModeControl
             mode={mode.mode}
             history={mode.history}
             loadError={mode.loadError}
             onChange={mode.change}
           />
-          {section !== "wallet" && section !== "safety" ? (
+          {section !== "wallet" &&
+          section !== "safety" &&
+          section !== "trade" ? (
             <MarketStatus
               state={marketsState}
               mode={mode.mode}

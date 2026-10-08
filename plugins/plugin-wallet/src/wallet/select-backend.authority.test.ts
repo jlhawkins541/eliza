@@ -23,12 +23,68 @@ const saved = Object.fromEntries(
   ENV_KEYS.map((key) => [key, process.env[key]]),
 ) as Record<(typeof ENV_KEYS)[number], string | undefined>;
 
-function runtime(mode: "local" | "steward" | "auto"): IAgentRuntime {
+function runtime(mode: string | undefined): IAgentRuntime {
   return {
     getSetting: (key: string) =>
       key === "ELIZA_WALLET_BACKEND" ? mode : undefined,
   } as unknown as IAgentRuntime;
 }
+
+describe("wallet backend mode", () => {
+  beforeEach(() => {
+    resetDevCloudEnvAuthorityForTests();
+    for (const key of ENV_KEYS) delete process.env[key];
+    vi.spyOn(LocalEoaBackend, "create").mockResolvedValue({
+      kind: "local",
+    } as never);
+    vi.spyOn(StewardBackend, "create").mockResolvedValue({
+      kind: "steward",
+    } as never);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const key of ENV_KEYS) {
+      const value = saved[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    resetDevCloudEnvAuthorityForTests();
+  });
+
+  it.each([" Local ", "LOCAL", "local\n"])(
+    "reads %j as local even on a cloud-provisioned agent",
+    async (mode) => {
+      process.env.ELIZA_CLOUD_PROVISIONED = "1";
+      await expect(resolveWalletBackend(runtime(mode))).resolves.toMatchObject({
+        kind: "local",
+      });
+      expect(StewardBackend.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses a misspelled mode instead of falling back to auto", async () => {
+    process.env.ELIZA_CLOUD_PROVISIONED = "1";
+    await expect(resolveWalletBackend(runtime("lcoal"))).rejects.toMatchObject({
+      code: "WALLET_BACKEND_MODE_INVALID",
+    });
+    expect(StewardBackend.create).not.toHaveBeenCalled();
+    expect(LocalEoaBackend.create).not.toHaveBeenCalled();
+  });
+
+  it("uses the environment when the runtime setting is blank", async () => {
+    process.env.ELIZA_WALLET_BACKEND = "steward";
+    await expect(resolveWalletBackend(runtime(""))).resolves.toMatchObject({
+      kind: "steward",
+    });
+  });
+
+  it("defaults to local in auto mode off the cloud", async () => {
+    await expect(
+      resolveWalletBackend(runtime(undefined)),
+    ).resolves.toMatchObject({ kind: "local" });
+  });
+});
 
 describe("wallet backend development Cloud authority", () => {
   beforeEach(() => {

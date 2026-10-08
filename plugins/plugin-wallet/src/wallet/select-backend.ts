@@ -9,21 +9,37 @@ import {
   resolveDevCloudStewardOperationalTuple,
 } from "@elizaos/shared";
 import type { WalletBackend } from "./backend.js";
-import { StewardUnavailableError } from "./errors.js";
+import {
+  StewardUnavailableError,
+  WalletBackendNotConfiguredError,
+} from "./errors.js";
 import { LocalEoaBackend } from "./local-eoa-backend.js";
 import { StewardBackend } from "./steward-backend.js";
 
 export type WalletBackendMode = "local" | "steward" | "auto";
 
+/**
+ * Reads `ELIZA_WALLET_BACKEND`, ignoring case and surrounding spaces. An
+ * unrecognized value is an error rather than `auto`: a typo such as
+ * `lcoal` must not quietly hand signing to Steward on a cloud-provisioned
+ * agent.
+ */
 function readMode(runtime: IAgentRuntime): WalletBackendMode {
+  const setting = runtime.getSetting("ELIZA_WALLET_BACKEND");
   const raw =
-    runtime.getSetting("ELIZA_WALLET_BACKEND") ??
-    process.env.ELIZA_WALLET_BACKEND ??
-    "auto";
-  if (raw === "local" || raw === "steward" || raw === "auto") {
-    return raw;
+    setting === null || setting === undefined || setting === ""
+      ? process.env.ELIZA_WALLET_BACKEND
+      : setting;
+  if (raw === undefined || raw === null) return "auto";
+  const mode = String(raw).trim().toLowerCase();
+  if (mode === "") return "auto";
+  if (mode === "local" || mode === "steward" || mode === "auto") {
+    return mode;
   }
-  return "auto";
+  throw new WalletBackendNotConfiguredError(
+    "WALLET_BACKEND_MODE_INVALID",
+    `ELIZA_WALLET_BACKEND is "${String(raw)}"; it must be local, steward or auto.`,
+  );
 }
 
 function preferStewardInAuto(): boolean {

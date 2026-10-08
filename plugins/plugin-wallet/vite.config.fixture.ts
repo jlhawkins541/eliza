@@ -1,8 +1,9 @@
 /**
  * Local browser-QA harness for the Wallet and crypto terminal views. Not part
- * of the shipped bundle. The dev server mounts the real terminal market and
- * token safety routes so `terminal.html` renders live data through the
- * production handlers.
+ * of the shipped bundle. The dev server mounts the real terminal market,
+ * token safety, pairs, and social routes so `terminal.html` renders live data through
+ * the production handlers; the social route reads `LUNARCRUSH_API_KEY` from
+ * the shell that starts the server.
  */
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -37,6 +38,15 @@ const { handleWalletTerminalMarketRoute } = await import(
 const { handleWalletTerminalTokenSafetyRoute } = await import(
   "./src/routes/wallet-terminal-token-safety-route.ts"
 );
+const { handleWalletTerminalPairsRoute } = await import(
+  "./src/routes/wallet-terminal-pairs-route.ts"
+);
+const { handleWalletTerminalSocialRoute } = await import(
+  "./src/routes/wallet-terminal-social-route.ts"
+);
+const fixtureSettings = {
+  getSetting: (key: string) => process.env[key] ?? null,
+};
 
 export default defineConfig({
   root: path.resolve(pluginRoot, "src/ui/__e2e__"),
@@ -54,6 +64,14 @@ export default defineConfig({
             .then(
               (handled) =>
                 handled || handleWalletTerminalTokenSafetyRoute(req, res),
+            )
+            .then(
+              (handled) => handled || handleWalletTerminalPairsRoute(req, res),
+            )
+            .then(
+              (handled) =>
+                handled ||
+                handleWalletTerminalSocialRoute(req, res, fixtureSettings),
             )
             .then(
               (handled) => {

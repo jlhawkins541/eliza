@@ -15,6 +15,11 @@ import type http from "node:http";
 import type { Plugin, Route } from "@elizaos/core";
 import { handleWalletMarketOverviewRoute } from "./wallet-market-overview-route";
 import { handleWalletTerminalMarketRoute } from "./wallet-terminal-market-route";
+import { handleWalletTerminalPairsRoute } from "./wallet-terminal-pairs-route";
+import {
+  handleWalletTerminalSocialRoute,
+  type SocialRouteSettings,
+} from "./wallet-terminal-social-route";
 import { handleWalletTerminalTokenSafetyRoute } from "./wallet-terminal-token-safety-route";
 
 async function marketOverviewHandler(
@@ -38,6 +43,17 @@ async function terminalMarketHandler(
   );
 }
 
+async function terminalPairsHandler(
+  req: unknown,
+  res: unknown,
+  _runtime: unknown,
+): Promise<void> {
+  await handleWalletTerminalPairsRoute(
+    req as http.IncomingMessage,
+    res as http.ServerResponse,
+  );
+}
+
 async function terminalTokenSafetyHandler(
   req: unknown,
   res: unknown,
@@ -46,6 +62,18 @@ async function terminalTokenSafetyHandler(
   await handleWalletTerminalTokenSafetyRoute(
     req as http.IncomingMessage,
     res as http.ServerResponse,
+  );
+}
+
+async function terminalSocialHandler(
+  req: unknown,
+  res: unknown,
+  runtime: unknown,
+): Promise<void> {
+  await handleWalletTerminalSocialRoute(
+    req as http.IncomingMessage,
+    res as http.ServerResponse,
+    (runtime as SocialRouteSettings | null) ?? null,
   );
 }
 
@@ -96,6 +124,27 @@ const walletHttpRoutes: Route[] = [
     publicReason:
       "Token safety is cached public GoPlus data about a mint with no account state.",
     handler: terminalTokenSafetyHandler,
+  },
+  // GET /api/wallet/terminal/pairs — read-only DexScreener liquidity for one
+  // Solana mint.
+  {
+    type: "GET",
+    path: "/api/wallet/terminal/pairs",
+    rawPath: true,
+    public: true,
+    name: "wallet-terminal-pairs",
+    publicReason:
+      "Terminal liquidity is cached public DexScreener data about a mint with no account state.",
+    handler: terminalPairsHandler,
+  },
+  // GET /api/wallet/terminal/social — read-only LunarCrush social signal for
+  // one ticker. Authenticated: each uncached lookup spends the agent's key.
+  {
+    type: "GET",
+    path: "/api/wallet/terminal/social",
+    rawPath: true,
+    name: "wallet-terminal-social",
+    handler: terminalSocialHandler,
   },
 ];
 

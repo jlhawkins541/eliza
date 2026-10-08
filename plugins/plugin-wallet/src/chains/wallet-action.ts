@@ -1,17 +1,18 @@
 /**
  * Defines `walletRouterAction`, the single `WALLET` action that dispatches
  * every wallet subaction (`transfer`, `swap`, `bridge`, `gov`, `pump_fun_buy`,
- * `token_info`, `search_address`, `token_safety`, `onchain_token_safety`) and
- * absorbs the legacy per-verb similes (`SWAP`, `TRANSFER`, `CROSS_CHAIN_TRANSFER`,
- * `WALLET_GOV`, `PUMP_FUN_BUY`, `TOKEN_INFO`, `BIRDEYE_SEARCH`, …) so older
- * prompts keep working. It parses
+ * `token_info`, `search_address`, `token_safety`, `onchain_token_safety`,
+ * `token_pairs`, `social_signal`) and absorbs the legacy per-verb similes
+ * (`SWAP`, `TRANSFER`, `CROSS_CHAIN_TRANSFER`, `WALLET_GOV`, `PUMP_FUN_BUY`,
+ * `TOKEN_INFO`, `BIRDEYE_SEARCH`, …) so older prompts keep working. It parses
  * and validates raw params via `parseWalletRouterParams`, routes financial
  * subactions through the `wallet-context-safety` recipient/injection guards
  * and the `wallet-financial-confirmation` gate before touching
- * `WalletBackendService`, and dispatches the three read-only analytics
+ * `WalletBackendService`, and dispatches the six read-only analytics
  * subactions (`token_info`, `search_address`, `token_safety`, a GoPlus
- * rug-risk report, and `onchain_token_safety`, a key-free on-chain Solana mint
- * read) directly to their handlers without the financial confirmation gate.
+ * rug-risk report, `onchain_token_safety`, a key-free on-chain Solana mint
+ * read, `token_pairs` and `social_signal`) directly to their handlers without
+ * the financial confirmation gate.
  */
 import type {
   Action,
@@ -25,7 +26,9 @@ import type {
   State,
 } from "@elizaos/core";
 import { walletSearchAddressHandler } from "../analytics/birdeye/actions/wallet-search-address.js";
+import { tokenPairsHandler } from "../analytics/dexscreener/pairs-action.js";
 import { tokenSafetyHandler } from "../analytics/goplus/action.js";
+import { socialSignalHandler } from "../analytics/lunarcrush/action.js";
 import { tokenInfoHandler } from "../analytics/token-info/action.js";
 import { tokenSafetyHandler as onchainTokenSafetyHandler } from "../analytics/token-safety/action.js";
 import {
@@ -95,6 +98,8 @@ const ANALYTICS_SUBACTIONS = [
   "search_address",
   "token_safety",
   "onchain_token_safety",
+  "token_pairs",
+  "social_signal",
 ] as const;
 type WalletAnalyticsSubaction = (typeof ANALYTICS_SUBACTIONS)[number];
 
@@ -431,6 +436,10 @@ const ANALYTICS_HANDLERS: Record<
     tokenSafetyHandler(a.runtime, a.message, a.state, a.options, a.callback),
   onchain_token_safety: (a) =>
     onchainTokenSafetyHandler(a.runtime, a.raw, a.callback),
+  token_pairs: (a) =>
+    tokenPairsHandler(a.runtime, a.message, a.state, a.options, a.callback),
+  social_signal: (a) =>
+    socialSignalHandler(a.runtime, a.message, a.state, a.options, a.callback),
 };
 
 async function parseRouterParams(
@@ -589,9 +598,9 @@ async function runWalletRouter(
 export const walletRouterAction: Action = {
   name: "WALLET",
   description:
-    "Route wallet operations through registered chain handlers and analytics providers. Use action=transfer|swap|bridge|gov|pump_fun_buy for on-chain ops (params: chain, toChain, fromToken, toToken, amount, recipient, slippageBps, mode, dryRun); action=token_info for token/market data (params: target, query, address, chain); action=search_address for Birdeye wallet/portfolio lookup (param: address); action=token_safety for a GoPlus rug-risk check of a Solana mint with a verdict (param: address); action=onchain_token_safety, an independent read-only on-chain Solana mint check from SOLANA_RPC_URL (no key, no signing): token program, supply/decimals, mint and freeze authority, every Token-2022 extension (TransferHook, TransferFeeConfig, PermanentDelegate, NonTransferable, DefaultAccountState, MintCloseAuthority, PausableConfig decoded; others listed by name) and the largest token accounts' share of supply (accounts, not owners); a check that could not run reads UNKNOWN, never passed (param: address = the mint).",
+    "Route wallet operations through registered chain handlers and analytics providers. Use action=transfer|swap|bridge|gov|pump_fun_buy for on-chain ops (params: chain, toChain, fromToken, toToken, amount, recipient, slippageBps, mode, dryRun); action=token_info for token/market data (params: target, query, address, chain); action=search_address for Birdeye wallet/portfolio lookup (param: address); action=token_safety for a GoPlus rug-risk check of a Solana mint with a verdict (param: address); action=onchain_token_safety, an independent read-only on-chain Solana mint check from SOLANA_RPC_URL (no key, no signing): token program, supply/decimals, mint and freeze authority, every Token-2022 extension (TransferHook, TransferFeeConfig, PermanentDelegate, NonTransferable, DefaultAccountState, MintCloseAuthority, PausableConfig decoded; others listed by name) and the largest token accounts' share of supply (accounts, not owners); a check that could not run reads UNKNOWN, never passed (param: address = the mint); action=token_pairs for DexScreener liquidity, 24h volume and pool age of a Solana mint (param: address), a signal that can only add caution; action=social_signal for a LunarCrush Galaxy Score, AltRank and sentiment lookup by ticker (param: symbol), a signal that can only add caution.",
   descriptionCompressed:
-    "WALLET transfer|swap|bridge|gov|pump_fun_buy|token_info|search_address|token_safety|onchain_token_safety; chain ops + market/portfolio + GoPlus token safety + on-chain Solana mint safety",
+    "WALLET transfer|swap|bridge|gov|pump_fun_buy|token_info|search_address|token_safety|onchain_token_safety|token_pairs|social_signal; chain ops + market/portfolio + GoPlus token safety + on-chain Solana mint safety + liquidity + social signal",
   contexts: ["finance", "crypto", "wallet"],
   contextGate: { anyOf: ["finance", "crypto", "wallet"] },
   roleGate: { minRole: "ADMIN" },
@@ -630,6 +639,8 @@ export const walletRouterAction: Action = {
         "search_address",
         "token_safety",
         "onchain_token_safety",
+        "token_pairs",
+        "social_signal",
       ],
     },
     {
@@ -766,9 +777,16 @@ export const walletRouterAction: Action = {
       schema: { type: "string" },
     },
     {
+      name: "symbol",
+      description:
+        "Coin ticker for social_signal, such as SOL or BONK (letters and digits).",
+      required: false,
+      schema: { type: "string" },
+    },
+    {
       name: "address",
       description:
-        "Wallet address for search_address; token contract address for token_info token lookups; Solana token mint for token_safety; Solana mint address (base58) for onchain_token_safety.",
+        "Wallet address for search_address; token contract address for token_info token lookups; Solana token mint for token_safety and token_pairs; Solana mint address (base58) for onchain_token_safety.",
       required: false,
       schema: { type: "string" },
     },

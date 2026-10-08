@@ -1,0 +1,54 @@
+{
+  "_note": "Hand-built from DexScreener's documented token-pairs/v1 shape, not a recorded response. Replace it with a captured BONK response when one is available.",
+  "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+  "dexscreener": [
+    {
+      "chainId": "solana",
+      "dexId": "raydium",
+      "url": "https://dexscreener.com/solana/hvnvi2sqjjnwcbtvwnbdv7nhdiikmvrrbeca5dtq2hsk",
+      "pairAddress": "HVNVi2sqjjnWcBtVwnBDv7nhDiikmvRRbEcA5DtQ2hsK",
+      "baseToken": {
+        "address": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+        "name": "Bonk",
+        "symbol": "BONK"
+      },
+      "quoteToken": {
+        "address": "So11111111111111111111111111111111111111112",
+        "name": "Wrapped SOL",
+        "symbol": "SOL"
+      },
+      "priceNative": "0.0000001507",
+      "priceUsd": "0.00002841",
+      "priceChange": { "m5": 0.11, "h1": -0.62, "h6": 1.84, "h24": -3.57 },
+      "liquidity": { "usd": 4210000, "base": 74100000000, "quote": 15820 },
+      "volume": { "m5": 18200, "h1": 204000, "h6": 1180000, "h24": 5460000 },
+      "fdv": 2180000000,
+      "marketCap": 2180000000,
+      "pairCreatedAt": 1672531200000
+    },
+    {
+      "chainId": "solana",
+      "dexId": "meteora",
+      "url": "https://dexscreener.com/solana/9xqeccdzlagqwvqnekv2zpzdwpz3zlvnwrdvgsrhfqpb",
+      "pairAddress": "9xQeCCDZLagQWVqNekV2zpZDWPZ3ZLvnwRDvGsRhFQpB",
+      "baseToken": {
+        "address": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+        "name": "Bonk",
+        "symbol": "BONK"
+      },
+      "quoteToken": {
+        "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "name": "USD Coin",
+        "symbol": "USDC"
+      },
+      "priceNative": "0.00002839",
+      "priceUsd": "0.00002839",
+      "priceChange": { "h24": -3.41 },
+      "liquidity": { "usd": 812000, "base": 14300000000, "quote": 406000 },
+      "volume": { "h24": 1240000 },
+      "fdv": 2178000000,
+      "marketCap": 2178000000,
+      "pairCreatedAt": 1700000000000
+    }
+  ]
+}

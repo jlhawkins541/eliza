@@ -21,6 +21,8 @@ Adds a unified wallet action+provider surface to an Eliza agent, replacing the p
 | `WALLET` | `search_address` | Birdeye wallet/portfolio lookup by address. |
 | `WALLET` | `token_safety` | Read-only GoPlus rug-risk check of one Solana mint (authorities, Token-2022 extensions, holder concentration, liquidity) with an avoid/caution/no-major-flags verdict. |
 | `WALLET` | `onchain_token_safety` | Read-only on-chain Solana mint safety check from `SOLANA_RPC_URL` only (no API key, no signing; PROVIDER_UNAVAILABLE when unset): token program, supply, mint/freeze authority, Token-2022 risk extensions decoded, other extensions by name, largest token accounts' share of supply (accounts, not owners; RPC returns ≤20). A check that could not run reads UNKNOWN, never a pass. Dispatched before `runWalletRouter`; never reaches `WalletBackend`, SolanaService key paths or the confirmation gate. |
+| `WALLET` | `token_pairs` | Read-only DexScreener lookup of one Solana mint's pools (price, liquidity, 24h volume, pool age). No key. Total liquidity under $10K, an oldest pool under a day, or no pool reporting its age adds caution; it never clears a GoPlus flag. |
+| `WALLET` | `social_signal` | Read-only LunarCrush lookup by ticker (Galaxy Score, AltRank, sentiment, social volume). Needs `LUNARCRUSH_API_KEY`; without it, returns the add-a-key step and sends nothing. A Galaxy Score under 30 adds caution; the signal never clears a GoPlus flag. |
 | `TRADE` | `inspect_account`, `inspect_session`, `submit_order` | Governed Steward trading account/session inspection and confirmed order intent for Hyperliquid and Polymarket. |
 
 Similes handled: `SWAP`, `SWAP_SOLANA`, `TRANSFER`, `TRANSFER_TOKEN`, `WALLET_SWAP`, `WALLET_TRANSFER`, `CROSS_CHAIN_TRANSFER`, `PREPARE_TRANSFER`, `WALLET_ACTION`, `WALLET_GOV`, `PUMP_FUN_BUY`, `PUMPFUN_BUY`, `TOKEN_INFO`, `BIRDEYE_LOOKUP`, `BIRDEYE_SEARCH`, `WALLET_SEARCH_ADDRESS`, plus `TOKEN_SECURITY` (owned by the promoted `WALLET_ONCHAIN_TOKEN_SAFETY` virtual, whose automatic simile is `ONCHAIN_TOKEN_SAFETY`). The parent also routes `action=TOKEN_SECURITY` to `onchain_token_safety`. The on-chain virtual deliberately claims neither `TOKEN_SAFETY` nor `CHECK_TOKEN_SAFETY`: the third-party plugin-x402-finance registers an action named `CHECK_TOKEN_SAFETY` with simile `TOKEN_SAFETY` for its EVM honeypot check. Note that promotion gives the GoPlus `token_safety` subaction's virtual (`WALLET_TOKEN_SAFETY`) the automatic simile `TOKEN_SAFETY`, so that name is shared with plugin-x402-finance when both plugins are loaded.
@@ -55,7 +57,7 @@ All on-chain subactions (`transfer`, `swap`, `bridge`, `gov`, `pump_fun_buy`) re
 
 **Routes (HTTP):**
 
-`handleWalletRoutes` in `src/api/wallet-routes.ts` is mounted by `@elizaos/agent`'s HTTP server. Endpoints cover wallet generate, import, balances, export, config, and chain/RPC settings. Solana-specific REST routes live in `src/chains/solana/routes/` and are registered directly on the plugin's `routes` array.
+`handleWalletRoutes` in `src/api/wallet-routes.ts` is mounted by `@elizaos/agent`'s HTTP server. Endpoints cover wallet generate, import, balances, export, config, chain/RPC settings, the crypto terminal's authenticated real trades (`GET /api/wallet/terminal/trade/status`, `POST .../review`, `POST .../execute`, implemented in `src/api/terminal-trade.ts`), and its Kraken/OKX spot limit orders (`GET /api/wallet/terminal/exchange/status`, `GET .../orders`, `POST .../review`, `.../execute`, `.../refresh`, `.../cancel`, implemented in `src/api/terminal-exchange.ts` over the signed clients in `src/api/exchange-venues.ts`). Solana-specific REST routes live in `src/chains/solana/routes/` and are registered directly on the plugin's `routes` array.
 
 EVM sign routes live in `src/chains/evm/routes/sign.ts`.
 
@@ -64,6 +66,10 @@ EVM sign routes live in `src/chains/evm/routes/sign.ts`.
 ```
 plugins/plugin-wallet/
   auto-enable.ts               Auto-enable logic (env-read only, no service imports)
+  characters/                  Crypto Queen character; runs on local Ollama via
+                               @elizaos/plugin-zerollama (README.md has the run steps,
+                               crypto-queen.env.example the settings for every plugin
+                               it loads)
   src/
     index.ts                   Package barrel — re-exports everything
     plugin.ts                  walletPlugin object (services/providers/actions/init/dispose)
@@ -71,6 +77,8 @@ plugins/plugin-wallet/
     contracts.ts               On-chain contract type definitions and exports
     register-routes.ts         Route registration helpers
     wallet-action.ts           Top-level wallet action re-export
+    characters/                Crypto Queen character test and `check:crypto-queen`
+                               setup check (Ollama models, Solana RPC and key, storage)
     actions/
       failure-codes.ts         Failure code constants
       intent-trajectory.ts     Intent trajectory types
@@ -111,10 +119,13 @@ plugins/plugin-wallet/
       canonical-provider.ts    CanonicalProvider interface definition
     analytics/
       birdeye/                 BirdeyeService, market/trending/portfolio providers
-      dexscreener/             DexScreenerService
+      dexscreener/             DexScreenerService, plus the token-pairs client and WALLET
+                               token_pairs handler (shared with the terminal's pairs route)
       token-info/              TokenInfoService (multi-provider dispatcher)
       goplus/                  GoPlus Solana token security client + WALLET token_safety handler
                                (shared with the terminal's token safety route)
+      lunarcrush/              LunarCrush v4 social signal client + WALLET social_signal handler
+                               (shared with the terminal's social route)
       token-safety/            On-chain Solana mint safety check (WALLET onchain_token_safety)
       lpinfo/                  kaminoPlugin, lpinfoPlugin, steerPlugin re-exports
       news/                    defiNewsPlugin, NewsDataService
@@ -135,12 +146,27 @@ plugins/plugin-wallet/
       wallet-financial-confirmation.ts  requireConfirmation gate for on-chain writes
     api/
       wallet-routes.ts         handleWalletRoutes — mounted by @elizaos/agent HTTP server
+      terminal-trade.ts        Terminal real trades: review (build + simulate the Jupiter
+                               swap, hold its bytes 60s) and execute (sign those bytes)
+      terminal-exchange.ts     Terminal Kraken/OKX limit orders: review (venue check +
+                               funds, hold 60s), execute once, session journal
+      exchange-venues.ts       Signed Kraken and OKX REST clients (keys only in headers)
+      __tests__/               Terminal trade route harness (Jupiter/RPC doubles, real signer)
+    mcp/                       Read-only terminal MCP server: tool catalog and GET-only
+                               dispatch to /api/wallet/terminal/* (terminal-tools.ts),
+                               low-level SDK stdio glue (server.ts), `mcp` entry
     routes/
       plugin.ts                Additional plugin route exports
-      wallet-terminal-market-route.ts  Public read-only CoinGecko market list and
-                               price history for the crypto terminal
+      wallet-terminal-market-route.ts  Public read-only market list and price
+                               history for the crypto terminal: CoinGecko, falling
+                               back to CoinPaprika when CoinGecko fails
+      coinpaprika-backup.ts    CoinPaprika URLs and parsers for that backup
       wallet-terminal-token-safety-route.ts  Public read-only GoPlus Solana token
                                safety report (checks + avoid/caution verdict)
+      wallet-terminal-pairs-route.ts  Public read-only DexScreener pools and liquidity
+                               for one Solana mint
+      wallet-terminal-social-route.ts  Authenticated read-only LunarCrush social signal
+                               by ticker (the key stays on the server)
     types/
       wallet-router.ts         WalletRouterParams, WalletRouterResult, WalletChainHandler interface
     register.ts                Renderer boot side-effect entry (elizaos.appRegister:"register");
@@ -156,9 +182,11 @@ plugins/plugin-wallet/
       InventoryView.tsx        GUI wallet view (Escape wrapper around InventoryAppView)
       CryptoTerminalView.tsx   /crypto terminal: live markets, watchlist, charts, paper
                                orders, paper portfolio, price alerts, token safety,
-                               HUNT/SLEEP/OFF mode, and the wallet dashboard tab
-      terminal/                Paper ledger, operating mode, and price alerts (pure),
-                               terminal data hooks, price chart
+                               Real trade tab, HUNT/SLEEP/OFF mode, PIN lock, and the
+                               wallet dashboard tab
+      terminal/                Paper ledger, operating mode, price alerts, and PIN lock
+                               (pure), terminal data hooks, price chart, lock screen,
+                               RealTradePanel (review dialog and confirm tap)
       InventoryView.interact.ts  `interact` view capability handler
       wallet-view-bundle.ts    Entry for the standalone Vite view bundle (dist/views/bundle.js)
       components/              InventoryAppView DOM dashboard
@@ -183,6 +211,8 @@ bun run --cwd plugins/plugin-wallet test          # run package tests
 bun run --cwd plugins/plugin-wallet test:watch    # watch test lane
 bun run --cwd plugins/plugin-wallet build:views   # standalone view bundle → dist/views/bundle.js
 bun run --cwd plugins/plugin-wallet build:ui-types # UI declaration emit (tsconfig.ui.json)
+bun run --cwd plugins/plugin-wallet check:crypto-queen # check packages/agent/.env and every connection Crypto Queen uses
+bun run --cwd plugins/plugin-wallet mcp           # read-only terminal MCP server over stdio (needs the running agent)
 ```
 
 `typecheck` runs both the Node tree (`tsconfig.json`, excludes `src/ui/**`) and the
@@ -195,7 +225,7 @@ All read via `runtime.getSetting()` (or `process.env` fallback where noted).
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ELIZA_WALLET_BACKEND` | No | `local` \| `steward` \| `auto` (default: `auto`). Auto = Steward when cloud-provisioned, else local. |
+| `ELIZA_WALLET_BACKEND` | No | `local` \| `steward` \| `auto` (default: `auto`; case and spaces ignored). Auto = Steward when cloud-provisioned, else local. Any other value fails with `WALLET_BACKEND_MODE_INVALID` instead of falling back to auto. |
 | `EVM_PRIVATE_KEY` | Local backend | 32-byte hex, 0x-prefixed. Local EOA signing key for EVM. |
 | `SOLANA_PRIVATE_KEY` | Solana local | Base58-encoded Solana private key. |
 | `STEWARD_API_URL` | Steward backend | Steward API base URL. |
@@ -215,7 +245,17 @@ All read via `runtime.getSetting()` (or `process.env` fallback where noted).
 | `COINGECKO_API_KEY` | No | CoinGecko API key (also accepts `COINGECKO_DEMO_API_KEY` / `COINGECKO_PRO_API_KEY`). |
 | `HELIUS_API_KEY` | No | Helius API key for enhanced Solana RPC. |
 | `ELIZAOS_CLOUD_API_KEY` | No | Eliza Cloud API key for cloud-routing fallbacks. |
-| `ELIZA_WALLET_EXPORT_TOKEN` | No | Auth token required to export wallet keys via HTTP routes. |
+| `ELIZA_WALLET_EXPORT_TOKEN` | No | Unused by this plugin: `POST /api/wallet/export` answers 410, so keys never leave `packages/agent/.env` over HTTP. |
+| `WALLET_TERMINAL_MAX_BUY_SOL` | No | Largest SOL amount one crypto terminal buy may spend. Defaults to `1`; a non-positive or non-numeric value is an error, not a fallback. |
+| `WALLET_TERMINAL_JITO_TIP_LAMPORTS` | No | Tip a crypto terminal trade sent through Jito pays. Defaults to `100000`; must be a whole number from `1000` (Jito's minimum) to `4000000` (the RPC route's priority-fee cap), otherwise an error. |
+| `KRAKEN_API_KEY`, `KRAKEN_API_SECRET` | No | Kraken API key and base64 secret for terminal exchange orders. Server-side only; trade rights only, never withdrawal rights. |
+| `OKX_API_KEY`, `OKX_API_SECRET`, `OKX_API_PASSPHRASE` | No | OKX API credentials for terminal exchange orders. Server-side only; trade rights only. |
+| `OKX_API_BASE_URL` | No | https origin for OKX's REST API (default `https://www.okx.com`); a path, query or non-https URL is an error. |
+| `WALLET_TERMINAL_MAX_ORDER_USD` | No | Largest value (quantity × limit price, or × the best bid for a sell limited below it, in the USD or USD-stablecoin quote) of one terminal exchange order. Defaults to `100`; a non-positive or non-numeric value is an error. |
+| `ELIZA_TERMINAL_MCP_URL` | No | http(s) origin of the agent the terminal MCP server reads from. Defaults to `http://127.0.0.1:<agent port>`; anything with a path, query or credentials, or plain http to a host other than this machine, is an error. |
+| `LUNARCRUSH_API_KEY` | No | LunarCrush API v4 key for the terminal's Social row and `WALLET action=social_signal`. Server-side only; never sent to the browser, logged, or returned. Unset means "Add a LunarCrush key" and no request. |
+| `JITO_BLOCK_ENGINE_URL` | No | https Jito block engine the terminal's Jito route sends to. Defaults to `https://mainnet.block-engine.jito.wtf`. |
+| `JITO_BLOCK_ENGINE_BACKUP_URLS` | No | Comma-separated https block engines tried in order when the first is unreachable or answers 429/5xx; the same signed bytes go to each, so a trade lands at most once. Defaults to Jito's ny, amsterdam, frankfurt and tokyo regions; `none` turns backups off. |
 | `X402_SUPPORTED_NETWORKS` | No | Comma-separated network list for x402 SDK. |
 | `X402_GLOBAL_DAILY_LIMIT` | No | Daily USDC spend cap for x402. |
 | `X402_PER_REQUEST_MAX` | No | Per-request USDC cap for x402. |
@@ -243,7 +283,7 @@ Extend `src/analytics/birdeye/service.ts`. The service proxies all calls through
 
 ## Conventions / gotchas
 
-- **Financial confirmation gate.** All on-chain subactions (`transfer`, `swap`, `bridge`, `gov`, `pump_fun_buy`) go through `gateWalletFinancialExecution` in `src/security/wallet-financial-confirmation.ts`, which calls `requireConfirmation` from `@elizaos/core`. The LLM cannot bypass this by passing `mode=execute` alone — a confirmed reply turn is always required. Do not remove or short-circuit this gate.
+- **Financial confirmation gate.** All on-chain subactions (`transfer`, `swap`, `bridge`, `gov`, `pump_fun_buy`) go through `gateWalletFinancialExecution` in `src/security/wallet-financial-confirmation.ts`, which calls `requireConfirmation` from `@elizaos/core`. The LLM cannot bypass this by passing `mode=execute` alone — a confirmed reply turn is always required. Do not remove or short-circuit this gate. The crypto terminal's real trades are a separate, person-only path with their own gate (see the crypto terminal convention below); never route agent actions through it.
 - **`WalletBackend` is the only signing path.** Providers and actions must never read raw private key env vars directly. Go through `WalletBackendService.getWalletBackend()` → `WalletBackend`.
 - **pump.fun buy path.** `pump_fun_buy` is a Solana handler alias (`pumpfun`, `pump.fun`, `pump-fun`, `pump`) that requires `toToken`/`token` as a valid Solana mint and `amount` as SOL. It requests a serialized transaction from PumpPortal trade-local, signs through `WalletBackend.getSolanaSigner()` when available (falling back to the existing local `getWalletKey` Solana path), opens the token page through the optional browser service when available, then submits through `SOLANA_RPC_URL`. `mode=simulate` (GH #16613) shares the trade-local build (`fetchPumpFunTransaction`) but resolves only a public key (`resolvePumpFunPublicKey`, never `WalletBackend.getSolanaSigner()`/local keypair), skips the browser coin-page open, and runs `connection.simulateTransaction` instead of signing/sending.
 - **onchain_token_safety is key-free and read-only.** It builds its own web3.js `Connection` from `SOLANA_RPC_URL` (`disableRetryOnRateLimit`, a 10 s `fetchMiddleware` deadline) and reads the mint with `getAccountInfoAndContext`, because `getAccountInfo` erases error types. It never calls `getWalletKey` or SolanaService key methods, which create and save a keypair, and never calls spl-token `getExtensionTypes` or `getExtensionData` on untrusted TLV (it walks the TLV with bounds checks instead). The RPC URL can embed a key, so the full URL, the password and every credential-named query value (`api-key`, `token`, `auth`, …) of any length, and each other component of 8 or more characters (query values, path segments, userinfo, host) are redacted from every message, and the URL never enters data, context or logs. Only a network-level failure (Node's `TypeError("fetch failed")`, a TypeError whose cause carries a socket code, or a Bun socket code) counts as `TRANSPORT_FAILED`; any other TypeError is `TOKEN_SAFETY_RPC_FAILED` and reaches the action boundary instead of degrading a check. Provider error bodies are kept complete in data and escaped onto one line in the text. Public RPCs often rate-limit `getTokenLargestAccounts`, so `holder_concentration` reads UNKNOWN there.
@@ -253,7 +293,9 @@ Extend `src/analytics/birdeye/service.ts`. The service proxies all calls through
 - **Auto-enable.** `auto-enable.ts` must remain a lightweight env-read module with no transitive plugin imports. The auto-enable engine loads it on every agent boot.
 - **UI surface is subpath-only.** The package root (`.`) is the server barrel and must never import `src/ui/**`. Hosts import `@elizaos/plugin-wallet/ui` (components/barrel) or rely on the manifest-driven renderer boot (`elizaos.appRegister: "register"` → `src/register.ts`). `src/ui/register-routes.ts` must execute exactly once; duplicate imports create duplicate shell pages.
 - **`walletAppPlugin` naming.** The UI descriptor is named `@elizaos/plugin-wallet:ui` with `packageName: "@elizaos/plugin-wallet"` so the views registry resolves the package dir while the app-route loader id stays distinct from the runtime `wallet` plugin. `normalizeAppRoutePluginId` strips `:ui`, so `ELIZA_SKIP_APP_ROUTE_PLUGINS=wallet` skips it.
-- **Crypto terminal is paper-only.** `CryptoTerminalView` prices orders from the live `/api/wallet/terminal/*` routes but applies them only to the local `terminal/paper-ledger.ts` state persisted under `eliza:wallet:paper-terminal:v1`. It must never sign, call `WalletBackend`, or route through the `WALLET`/`TRADE` actions; real execution belongs behind the financial confirmation gate. Its HUNT / SLEEP / OFF mode (`terminal/operating-mode.ts`, default SLEEP, persisted under `eliza:wallet:terminal-mode:v1`) changes only after a confirm dialog and records each change; OFF must make no automatic market request, and HUNT's scout only ranks movers for review. Price alerts (`terminal/price-alerts.ts`, persisted under `eliza:wallet:terminal-alerts:v1`) are one-shot in-terminal notices checked against live prices in HUNT and SLEEP and paused in OFF. No mode or alert may place, sign, or submit an order.
+- **Crypto terminal: paper orders, plus real trades only behind review and a tap.** `CryptoTerminalView` prices market-tab orders from the live `/api/wallet/terminal/*` routes but applies them only to the local `terminal/paper-ledger.ts` state persisted under `eliza:wallet:paper-terminal:v1`; paper orders never sign, call `WalletBackend`, or route through the `WALLET`/`TRADE` actions. Real trades live only in the Real trade tab (`terminal/RealTradePanel.tsx`) and go through `src/api/terminal-trade.ts`: review builds the exact Jupiter swap with `fetchJupiterSwapTransaction`, refuses a build whose fee payer is not the signing wallet, simulates it, and holds its unsigned bytes for 60 seconds; execute signs those same bytes through `WalletBackend.getSolanaSigner()` and sends them once. A review may instead name a browser wallet (`signer: { kind: "browser-wallet", address }`, Phantom via `terminal/browser-wallet.ts`): the swap is built for that address, the review returns the unsigned bytes, Phantom's `signTransaction` (never `signAndSendTransaction`) signs them in its own popup, and execute accepts the result only when its message is byte-for-byte the reviewed one and the first signature verifies for the reviewed address; anything else is refused without sending and leaves the review open. Never re-quote between review and execute, never sign a failed simulation, an expired or used review, or a review from a different wallet, and keep each buy within `WALLET_TERMINAL_MAX_BUY_SOL`. Each review picks a send route: `rpc` asks Jupiter for a capped priority fee and sends through the Solana RPC; `jito` asks Jupiter for a Jito tip instead (Jupiter takes one or the other under `prioritizationFeeLamports`) and sends only to the Jito block engine with `bundleOnly=true`, never also to the RPC, so a tipped trade is not broadcast publicly. The route is fixed at review time. Agent wallet trades need a trade permission that lets a person use the local wallet (`manual-local-key` or `agent-auto`); browser wallet trades are allowed in every mode but `disabled`, since the wallet's popup is the signature. Both kinds refuse `x-eliza-agent-action` requests, so a terminal trade always rests on a person's tap; the tab may switch `user-sign-only` to `manual-local-key` only after its own confirm dialog, never to `agent-auto`. The review shows chain, mint, amounts, minimum output, slippage, destination, fee budget, route, simulation, send route (RPC or Jito, with its tip), and the GoPlus verdict, DexScreener Liquidity row and LunarCrush Social row for buys. The Liquidity row (`terminal/LiquidityRow.tsx`, public `GET /api/wallet/terminal/pairs`) is keyed by the checked mint and keeps no-pairs, unavailable and stale as distinct states; total liquidity under $10K, an oldest pool under a day, or no pool reporting its age may raise a "no major flags" display to caution but must never lower a GoPlus verdict, and no liquidity value may enable a trade. The Social row (`terminal/SocialSignalRow.tsx`, `GET /api/wallet/terminal/social`) is authenticated, keyed by the GoPlus symbol, and keeps no-key, not-tracked, unavailable and stale as distinct states; a Galaxy Score under 30 may raise a "no major flags" display to caution but must never lower a GoPlus verdict, and no social value may enable a trade. Its HUNT / SLEEP / OFF mode (`terminal/operating-mode.ts`, default SLEEP, persisted under `eliza:wallet:terminal-mode:v1`) changes only after a confirm dialog and records each change; OFF must make no automatic market request, and HUNT's scout only ranks movers for review. Price alerts (`terminal/price-alerts.ts`, persisted under `eliza:wallet:terminal-alerts:v1`) are one-shot in-terminal notices checked against live prices in HUNT and SLEEP and paused in OFF. No mode or alert may place, sign, or submit an order. The optional PIN lock (`terminal/pin-lock.ts`, `terminal/TerminalLock.tsx`, persisted under `eliza:wallet:terminal-pin:v1`) stores only a salted PBKDF2-SHA-256 hash, starts the terminal locked, auto-locks after idle, and fails closed on an unreadable record; while locked the view renders only the lock screen (wallet and trade tabs included) but keeps polling and checking alerts. "Forgot PIN" erases every `TERMINAL_STORAGE_KEYS` record, never just the PIN. It is a privacy lock for the terminal, not a key vault: never store keys, seeds, or the PIN itself there.
+- **Exchange limit orders follow the same review-and-tap rule.** `src/api/terminal-exchange.ts` checks the exact order with the venue without placing it (Kraken `AddOrder validate=true`; OKX live instrument with lot, tick and minimum size), reads the available balance it would spend (Kraken `BalanceEx` minus what open orders hold), caps its value at `WALLET_TERMINAL_MAX_ORDER_USD` (a sell is valued at the venue's best bid when that is above its limit, since a low sell limit fills at the bid), and holds it 60 seconds; execute places that same order once with the client order id fixed at review. Every exchange route needs a trade permission that lets a person trade and refuses `x-eliza-agent-action` requests; never let the agent or an MCP tool reach review, execute, refresh or cancel. A send whose answer was lost, or that the venue answered with a "busy / unavailable / timed out" error (Kraken `EService:*` and `EGeneral:Internal error`, OKX 50001/50004/50013/50026), is journaled as `unknown` (never `rejected` or placed), and refresh looks it up by client order id among open and closed orders. Keys are read per request and appear only in signed headers, never in a response, error or log. The journal is in memory for the running process.
+- **Terminal MCP server is read-only.** `src/mcp/terminal-tools.ts` maps each tool to one GET on an existing `/api/wallet/terminal/*` route and validates arguments before sending. Never add a tool that reaches `trade/review`, `trade/execute`, a wallet route, or any non-GET method; real trades stay a person's tap in the terminal. `@modelcontextprotocol/sdk` is an optional dependency imported dynamically through the SDK's low-level `Server` with JSON-schema tool lists (the high-level `McpServer.registerTool` requires Zod schemas).
 - **View bundle.** `dist/views/bundle.js` is built by `vite.config.views.ts` (entry `src/ui/wallet-view-bundle.ts`, export `InventoryView`), not by the Node build. Both must run for a complete dist.
 
 ## Verification

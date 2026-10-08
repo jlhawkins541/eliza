@@ -1,7 +1,8 @@
 /**
  * Validates the shipped Crypto Queen character against the real core character
- * schema and checks that every plugin it loads is a workspace package, so the
- * file stays loadable as the schema and plugin set evolve.
+ * schema and checks that every plugin it loads is a workspace package, with
+ * local Ollama inference as its model provider, so the file stays loadable as
+ * the schema and plugin set evolve.
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -19,7 +20,7 @@ function workspacePackageNames(): Set<string> {
   const names = new Set<string>();
   for (const dir of [
     "plugins/plugin-sql",
-    "plugins/plugin-openai",
+    "plugins/plugin-zerollama",
     "plugins/plugin-wallet",
   ]) {
     const manifest = JSON.parse(
@@ -45,5 +46,7 @@ describe("crypto-queen character", () => {
       expect(available.has(plugin), plugin).toBe(true);
     }
     expect(result.data?.plugins).toContain("@elizaos/plugin-wallet");
+    // Crypto Queen runs on a local Ollama server; see characters/README.md.
+    expect(result.data?.plugins).toContain("@elizaos/plugin-zerollama");
   });
 });
