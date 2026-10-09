@@ -18,14 +18,82 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   delete process.env.OPENROUTER_BASE_URL;
   delete process.env.XAI_BASE_URL;
+  delete process.env.GOOGLE_GENERATIVE_AI_BASE_URL;
+  delete process.env.GOOGLE_GEMINI_BASE_URL;
 });
 
 describe("direct provider authority", () => {
+  it.each(["", "/", "/proxy", "/proxy/"])(
+    "probes the SDK Gemini override with prefix %s on loopback",
+    async (prefix) => {
+      const requests: { url: string; key: string | undefined }[] = [];
+      const server = createServer((request, response) => {
+        requests.push({
+          url: request.url ?? "",
+          key: request.headers["x-goog-api-key"] as string | undefined,
+        });
+        response.writeHead(200).end("{}");
+      });
+      await new Promise<void>((resolve) =>
+        server.listen(0, "127.0.0.1", resolve),
+      );
+      try {
+        const address = server.address();
+        if (!address || typeof address === "string") throw new Error("No port");
+        vi.stubEnv(
+          "GOOGLE_GEMINI_BASE_URL",
+          `http://127.0.0.1:${address.port}${prefix}`,
+        );
+        vi.stubEnv(
+          "GOOGLE_GENERATIVE_AI_BASE_URL",
+          "http://127.0.0.1:1/legacy",
+        );
+        const result = await probeDirectApiKey(
+          "gemini-api",
+          "synthetic-review-key",
+        );
+        expect(result).toMatchObject({ ok: true, status: 200 });
+        expect(requests).toEqual([
+          {
+            url: `${prefix.replace(/\/$/, "")}/v1beta/models?pageSize=1`,
+            key: "synthetic-review-key",
+          },
+        ]);
+        expect(JSON.stringify(result)).not.toContain("synthetic-review-key");
+      } finally {
+        server.closeAllConnections();
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        );
+      }
+    },
+  );
+
   it("uses canonical OpenRouter and xAI catalog endpoints", () => {
     expect(directProviderBaseUrl("openrouter-api")).toBe(
       "https://openrouter.ai/api/v1",
     );
     expect(directProviderBaseUrl("xai-api")).toBe("https://api.x.ai/v1");
+  });
+
+  it("probes Gemini with the API key header instead of placing the secret in the URL", async () => {
+    const fetchMock = vi.fn(
+      async (_url: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(null, { status: 200 }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      probeDirectApiKey("gemini-api", "gemini-secret"),
+    ).resolves.toMatchObject({ ok: true, status: 200 });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1",
+      expect.objectContaining({
+        method: "GET",
+        headers: { "x-goog-api-key": "gemini-secret" },
+      }),
+    );
+    expect(fetchMock.mock.calls[0]?.[0]).not.toContain("gemini-secret");
   });
 
   it("returns the complete deduplicated model catalog without the credential", async () => {
@@ -123,22 +191,25 @@ describe("direct provider authority", () => {
     expect(result.modelCatalogUnavailable).toBeUndefined();
   });
 
-  it("never reflects a provider failure body that could echo a secret", async () => {
-    globalThis.fetch = vi.fn(
-      async () =>
-        new Response("diagnostic echoed secret-value", { status: 401 }),
-    ) as unknown as typeof fetch;
+  it.each(["openrouter-api", "xai-api", "gemini-api"] as const)(
+    "never reflects a %s failure body that could echo a secret",
+    async (providerId) => {
+      globalThis.fetch = vi.fn(
+        async () =>
+          new Response("diagnostic echoed secret-value", { status: 401 }),
+      ) as unknown as typeof fetch;
 
-    const result = await probeDirectApiKey("openrouter-api", "secret-value");
+      const result = await probeDirectApiKey(providerId, "secret-value");
 
-    expect(result).toEqual({
-      ok: false,
-      status: 401,
-      error: "openrouter-api credential probe failed (HTTP 401)",
-      latencyMs: expect.any(Number),
-    });
-    expect(JSON.stringify(result)).not.toContain("secret-value");
-  });
+      expect(result).toEqual({
+        ok: false,
+        status: 401,
+        error: `${providerId} credential probe failed (HTTP 401)`,
+        latencyMs: expect.any(Number),
+      });
+      expect(JSON.stringify(result)).not.toContain("secret-value");
+    },
+  );
 
   it("rejects an invalid OpenRouter key before reading the public catalog", async () => {
     const fetchMock = vi.fn(async (url: string) => {

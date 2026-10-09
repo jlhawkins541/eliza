@@ -17,6 +17,16 @@ export function directProviderBaseUrl(
       );
     case "openai-api":
       return process.env.OPENAI_BASE_URL?.trim() || "https://api.openai.com/v1";
+    case "gemini-api":
+      // Match @google/genai: GOOGLE_GEMINI_BASE_URL is the service root and
+      // the SDK appends its default API version, including for proxy prefixes.
+      if (process.env.GOOGLE_GEMINI_BASE_URL?.trim()) {
+        return `${process.env.GOOGLE_GEMINI_BASE_URL.trim().replace(/\/$/, "")}/v1beta`;
+      }
+      return (
+        process.env.GOOGLE_GENERATIVE_AI_BASE_URL?.trim() ||
+        "https://generativelanguage.googleapis.com/v1beta"
+      );
     case "deepseek-api":
       return (
         process.env.DEEPSEEK_BASE_URL?.trim() || "https://api.deepseek.com"
@@ -249,19 +259,27 @@ export async function probeDirectApiKey(
               "x-api-key": apiKey,
             },
           })
-        : await fetch(
-            `${baseUrl}/${providerId === "openrouter-api" ? "key" : "models"}`,
-            {
+        : providerId === "gemini-api"
+          ? await fetch(`${baseUrl}/models?pageSize=1`, {
               method: "GET",
               signal: controller.signal,
-              headers: {
-                Authorization: `Bearer ${apiKey}`,
+              headers: { "x-goog-api-key": apiKey },
+            })
+          : await fetch(
+              `${baseUrl}/${providerId === "openrouter-api" ? "key" : "models"}`,
+              {
+                method: "GET",
+                signal: controller.signal,
+                headers: {
+                  Authorization: `Bearer ${apiKey}`,
+                },
               },
-            },
-          );
+            );
     if (!response.ok) {
       const preserveProviderDiagnostic =
-        providerId !== "openrouter-api" && providerId !== "xai-api";
+        providerId !== "openrouter-api" &&
+        providerId !== "xai-api" &&
+        providerId !== "gemini-api";
       const diagnostic = preserveProviderDiagnostic
         ? `: ${await readProbeFailureBody(response)}`
         : "";

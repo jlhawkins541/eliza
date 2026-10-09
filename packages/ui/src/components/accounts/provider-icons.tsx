@@ -157,6 +157,7 @@ const PROVIDER_MARKS: Record<
   "openai-api": OpenAIMark,
   "openai-codex": OpenAIMark,
   "gemini-cli": GeminiMark,
+  "gemini-api": GeminiMark,
   "deepseek-api": DeepSeekMark,
   "deepseek-coding": DeepSeekMark,
   "moonshot-api": MoonshotMark,

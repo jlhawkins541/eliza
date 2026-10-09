@@ -572,6 +572,7 @@ export const FIRST_RUN_PROVIDER_CATALOG = [
 export const DIRECT_ACCOUNT_PROVIDER_BY_FIRST_RUN_PROVIDER = {
 	anthropic: "anthropic-api",
 	openai: "openai-api",
+	gemini: "gemini-api",
 	deepseek: "deepseek-api",
 	zai: "zai-api",
 	moonshot: "moonshot-api",

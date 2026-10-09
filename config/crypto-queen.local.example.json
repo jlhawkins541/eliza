@@ -1,0 +1,29 @@
+{
+  "logging": {
+    "level": "info",
+    "redactSensitive": "tools"
+  },
+  "cloud": {
+    "enabled": false,
+    "runtime": "local",
+    "inferenceMode": "local"
+  },
+  "plugins": {
+    "entries": {
+      "wallet": {
+        "enabled": true
+      }
+    }
+  },
+  "env": {
+    "vars": {
+      "ELIZA_AGENT_WALLET_AUTO_ENABLE": "0"
+    }
+  },
+  "ui": {
+    "assistant": {
+      "name": "Crypto Queen",
+      "avatar": "CQ"
+    }
+  }
+}

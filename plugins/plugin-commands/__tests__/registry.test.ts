@@ -3,6 +3,7 @@
  * `startsWithCommand` matching, and register/unregister of custom commands.
  */
 import { beforeEach, describe, expect, it } from "vitest";
+import { getConnectorCommands } from "../src/connector-catalog";
 import {
 	findCommandByAlias,
 	findCommandByKey,
@@ -42,6 +43,16 @@ beforeEach(() => {
 });
 
 describe("alias lookup", () => {
+	it("offers gemini-api in the native accounts provider picker", () => {
+		for (const surface of ["discord", "telegram"]) {
+			const accounts = getConnectorCommands(surface).find(
+				(command) => command.name === "accounts",
+			);
+			expect(
+				accounts?.options.find((arg) => arg.name === "provider")?.choices,
+			).toContain("gemini-api");
+		}
+	});
 	it("finds a built-in command by alias, case/space-insensitively", () => {
 		const help = findCommandByAlias("/help");
 		expect(help?.key).toBe("help");

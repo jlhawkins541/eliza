@@ -280,6 +280,7 @@ export function isLinkedAccountProviderId(
 		value === "deepseek-coding" ||
 		value === "anthropic-api" ||
 		value === "openai-api" ||
+		value === "gemini-api" ||
 		value === "deepseek-api" ||
 		value === "zai-api" ||
 		value === "moonshot-api" ||

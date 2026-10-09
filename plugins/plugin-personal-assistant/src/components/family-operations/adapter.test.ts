@@ -105,6 +105,22 @@ describe("defaultFamilyOperationsAdapter", () => {
     });
   });
 
+  it("reports the HTTP status when an upstream error is not JSON", async () => {
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response("Bad Gateway", {
+          status: 502,
+          headers: { "content-type": "text/plain" },
+        }),
+    );
+
+    expect((await defaultFamilyOperationsAdapter.load()).agreements).toEqual({
+      status: "unavailable",
+      message: "Request failed (502)",
+    });
+  });
+
   it("loads and mutates the mounted family workflow contracts", async () => {
     const calls: string[] = [];
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
