@@ -1,0 +1,59 @@
+# Dedicated keyless verification for the professional workspace branch.
+# Package scripts own build and test behavior; this lane only provisions runners.
+name: Professional workspace verification
+on:
+  push:
+    branches: [codex/professional-workspace-20261010]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: professional-workspace-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CI: "true"
+  ELIZA_UI_SMOKE_FORCE_STUB: "1"
+  ELIZA_UI_SMOKE_DISABLE_VIDEO: "1"
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install pinned workspace toolchain
+        uses: ./.github/actions/setup-bun-workspace
+        with:
+          bun-version: "1.3.14"
+          node-version: "24.15.0"
+          install-command: "bun install --frozen-lockfile --ignore-scripts"
+          install-native-deps: "false"
+          install-protoc: "false"
+          skip-avatar-clone: "true"
+          no-vision-deps: "true"
+      - name: Generate shared i18n data
+        run: node packages/app-core/scripts/ensure-shared-i18n-data.mjs
+      - name: Focused character coverage
+        run: bun run --cwd packages/shared test src/character-presets.crypto-queen.test.ts
+      - name: Focused workspace and launcher coverage
+        run: bun run --cwd packages/ui test -- src/components/shell/WorkspaceHeader.test.tsx src/components/pages/Launcher.test.tsx src/components/shell/HomeScreen.test.tsx
+      - name: Build application dependencies
+        run: bunx turbo run build --filter=@elizaos/core --filter=@elizaos/shared
+      - name: Build the real application package
+        run: bun run --cwd packages/app build
+      - name: Install Chromium
+        run: .github/scripts/install-playwright-browsers.sh chromium
+      - name: Smoke the real app shell
+        run: bun run --cwd packages/app test:e2e --project=chromium test/ui-smoke/workspace-layout.spec.ts test/ui-smoke/launcher-interaction.spec.ts
+      - name: Upload application and smoke evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: professional-workspace-app
+          path: |
+            packages/app/dist/
+            packages/app/test-results/
+          if-no-files-found: warn
+          retention-days: 14

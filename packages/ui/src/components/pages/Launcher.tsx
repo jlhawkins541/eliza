@@ -1,30 +1,18 @@
 /**
- * Launcher — iOS-like app/view launcher.
- *
- * Renders the curated view tiles as names-only icons in one grid. Tap launches. There is
- * one flat grid of every visible tile — no favorites, no recents, no section
- * dividers. Composition + visibility are owned by `curateLauncherPages` (system
- * + release always; developer + preview gated by their Settings toggles), so
- * the launcher is READ-ONLY: no reorder, no edit mode, no per-tile pin, no
- * persisted free-form layout. A standalone grid scrolls vertically; when
- * embedded on Home, the bounded Home app region owns that same vertical scroll.
- *
- * Renders no background of its own — the shared root `AppBackground` shows
- * through, matching the home screen. Tiles, labels, and the skeleton use a FIXED
- * white-on-wallpaper treatment (theme-independent, kept legible by a text-shadow
- * over the ambient field) rather than light/dark theme tokens.
+ * Searchable, theme-aware workspace application grid. Catalog curation and
+ * launch callbacks remain host-owned; existing hold/drag suppression and
+ * loading, retry, partial-source, and empty states are preserved.
  */
 
-import { memo, useCallback } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
+import { Search, X } from "lucide-react";
+import { Input } from "../ui/input";
+import { WorkspaceHeader } from "../shell/WorkspaceHeader";
 import { useClickSuppression } from "../../gestures/useClickSuppression";
 import { usePointerPressAndHold } from "../../gestures/usePointerPressAndHold";
 import type { ViewEntry } from "../../hooks/view-catalog";
 import { cn } from "../../lib/utils";
 import { emitViewInteraction } from "../../view-telemetry";
-import {
-  WALLPAPER_FLOAT_SHADOW,
-  WALLPAPER_TEXT,
-} from "../shell/wallpaper-idiom";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Skeleton } from "../ui/skeleton";
@@ -34,6 +22,23 @@ import {
 } from "../views/LauncherAppIcon";
 
 const LAUNCHER_RESPONSIVE_CSS = `
+[data-testid="launcher"].eliza-workspace-launcher { background:var(--bg); color:var(--text); padding:clamp(1rem,3vw,2.5rem); }
+.eliza-workspace-launcher [data-testid="launcher-page-window"] { align-items:stretch; padding-inline:0; padding-top:0; }
+.eliza-workspace-launcher [data-workspace-launcher-content] { max-width:64rem; margin-inline:auto; }
+.eliza-workspace-launcher [data-launcher-grid] { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:1rem; }
+.eliza-workspace-launcher [data-testid^="launcher-tile-"] > button { max-width:none; min-height:130px; align-items:flex-start; justify-content:flex-start; gap:1rem; padding:1.25rem; border:1px solid var(--border); border-radius:.875rem; background:var(--bg-elevated,var(--card)); color:var(--text-strong); text-align:left; transition:background 150ms ease,border-color 150ms ease; }
+.eliza-workspace-launcher [data-testid^="launcher-tile-"] > button:hover { background:var(--surface); border-color:var(--border-strong); }
+.eliza-workspace-launcher [data-testid^="launcher-tile-"] > button:focus-visible { outline:2px solid var(--ring,var(--accent)); outline-offset:3px; }
+.eliza-workspace-launcher[data-testid="launcher"] [data-launcher-icon] { width:44px; height:44px; border-radius:.625rem; background:#262626; border:none; box-shadow:none; }
+.eliza-workspace-launcher [data-launcher-label] { color:var(--text-strong); font-size:.875rem; font-weight:500; text-shadow:none; max-width:100%; text-align:left; width:auto; }
+.eliza-workspace-search { display:flex; align-items:center; gap:.75rem; padding:.625rem .875rem; border:1px solid var(--border); border-radius:.75rem; background:var(--bg-elevated,var(--card)); max-width:30rem; margin-bottom:1.5rem; }
+.eliza-workspace-search:focus-within { outline:2px solid var(--ring,var(--accent)); outline-offset:2px; }
+.eliza-workspace-search input { width:100%; min-width:0; border:0; background:transparent; box-shadow:none; height:32px; padding:0; outline:none; }
+.eliza-workspace-search input:focus-visible { box-shadow:none; outline:none; }
+@media(max-width:900px) { .eliza-workspace-launcher [data-launcher-grid] { grid-template-columns:repeat(3,minmax(0,1fr)); } }
+@media(max-width:600px) { .eliza-workspace-launcher [data-launcher-grid] { grid-template-columns:repeat(2,minmax(0,1fr)); gap:.75rem; } .eliza-workspace-launcher [data-testid^="launcher-tile-"] > button { padding:1rem; min-height:122px; } }
+@media(prefers-reduced-motion:reduce) { .eliza-workspace-launcher [data-testid^="launcher-tile-"] > button { transition:none; } }
+
 [data-testid="launcher"] { container-type: inline-size; }
 [data-testid="launcher"] [data-launcher-icon] {
   width: clamp(3.5rem, 16cqi, 4.5rem);
@@ -149,8 +154,7 @@ const IconTile = memo(function IconTile({ entry, onLaunch }: IconTileProps) {
           data-compact-label={hasLongUnbrokenLabel || undefined}
           className={cn(
             "line-clamp-2 w-max max-w-[5.5rem] text-center text-xs font-bold leading-tight tracking-[0.01em] whitespace-normal",
-            WALLPAPER_TEXT.base,
-            WALLPAPER_FLOAT_SHADOW,
+            "text-txt-strong",
           )}
         >
           {entry.label}
@@ -169,6 +173,15 @@ export function Launcher({
   className,
   embedded = false,
 }: LauncherProps) {
+  const [query, setQuery] = useState("");
+  const visibleEntries = useMemo(() => {
+    const term = query.trim().toLocaleLowerCase();
+    return term
+      ? entries.filter((entry) =>
+          entry.label.toLocaleLowerCase().includes(term),
+        )
+      : entries;
+  }, [entries, query]);
   const handleLaunch = useCallback(
     (entry: ViewEntry) => {
       emitViewInteraction({
@@ -189,7 +202,11 @@ export function Launcher({
 
   return (
     <div
-      className={cn("flex flex-col", !embedded && "min-h-0 flex-1", className)}
+      className={cn(
+        "eliza-workspace-launcher flex flex-col",
+        !embedded && "min-h-0 flex-1",
+        className,
+      )}
       data-testid="launcher"
       aria-busy={showSkeleton || undefined}
     >
@@ -214,9 +231,44 @@ export function Launcher({
               : "scroll-fade-b scroll-fade-b-[1.25rem] [--scroll-fade-reveal:1px] mb-[calc(var(--eliza-mobile-nav-offset,0px)+max(var(--safe-area-bottom,0px),var(--android-gesture-inset-bottom,0px))+var(--eliza-chat-clearance,5.25rem)+0.5rem)] min-h-0 flex-1 scroll-pb-7 overflow-y-auto ps-6 pe-[calc(1.5rem+var(--eliza-chat-side-clearance,0px))] pb-7",
           )}
         >
-          <div className="flex w-full max-w-2xl flex-col gap-6">
+          <div
+            data-workspace-launcher-content=""
+            className="flex w-full max-w-2xl flex-col gap-6"
+          >
+            {!embedded ? <WorkspaceHeader page="launcher" /> : null}
+            {!showSkeleton && !showError && entries.length > 0 ? (
+              <div className="eliza-workspace-search">
+                <Search
+                  size={18}
+                  className="shrink-0 text-muted"
+                  aria-hidden="true"
+                />
+                <Input
+                  aria-label="Search applications"
+                  placeholder="Search applications…"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") setQuery("");
+                  }}
+                />
+                {query ? (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Clear application search"
+                    onClick={() => setQuery("")}
+                  >
+                    <X size={16} aria-hidden="true" />
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
             {showSkeleton ? (
-              <div className="grid w-full grid-cols-3 gap-x-4 gap-y-5 min-[360px]:grid-cols-4 sm:grid-cols-5">
+              <div
+                data-launcher-grid=""
+                className="grid w-full grid-cols-3 gap-x-4 gap-y-5 min-[360px]:grid-cols-4 sm:grid-cols-5"
+              >
                 {["a", "b", "c", "d", "e", "f", "g", "h"].map((id) => (
                   <div
                     key={id}
@@ -233,12 +285,10 @@ export function Launcher({
                 data-testid="launcher-error"
                 className="mx-auto flex min-h-48 max-w-sm flex-col items-center justify-center gap-3 px-5 text-center"
               >
-                <div
-                  className={cn("text-sm font-semibold", WALLPAPER_TEXT.base)}
-                >
+                <div className={cn("text-sm font-semibold", "text-txt-strong")}>
                   Couldn&apos;t load apps
                 </div>
-                <p className={cn("text-xs", WALLPAPER_TEXT.muted)}>
+                <p className={cn("text-xs", "text-muted-strong")}>
                   Check the connection and try again.
                 </p>
                 {onRetry ? (
@@ -258,31 +308,45 @@ export function Launcher({
                 data-testid="launcher-empty"
                 className="mx-auto flex min-h-48 max-w-sm flex-col items-center justify-center gap-2 px-5 text-center"
               >
-                <div
-                  className={cn("text-sm font-semibold", WALLPAPER_TEXT.base)}
-                >
+                <div className={cn("text-sm font-semibold", "text-txt-strong")}>
                   No apps available
                 </div>
-                <p className={cn("text-xs", WALLPAPER_TEXT.muted)}>
+                <p className={cn("text-xs", "text-muted-strong")}>
                   Available apps and views will appear here.
                 </p>
               </div>
             ) : (
               <>
-                <div className="grid w-full grid-cols-3 gap-x-4 gap-y-5 min-[360px]:grid-cols-4 max-sm:portrait:gap-y-8 sm:grid-cols-5">
-                  {entries.map((entry) => (
+                <div
+                  data-launcher-grid=""
+                  className="grid w-full grid-cols-3 gap-x-4 gap-y-5 min-[360px]:grid-cols-4 max-sm:portrait:gap-y-8 sm:grid-cols-5"
+                >
+                  {visibleEntries.map((entry) => (
                     <div key={entry.id} className="flex justify-center">
                       <IconTile entry={entry} onLaunch={handleLaunch} />
                     </div>
                   ))}
                 </div>
+                {visibleEntries.length === 0 ? (
+                  <div
+                    role="status"
+                    className="flex min-h-48 flex-col items-center justify-center gap-3 text-center"
+                  >
+                    <p className="text-sm text-muted-strong">
+                      No applications match your search.
+                    </p>
+                    <Button variant="outline" onClick={() => setQuery("")}>
+                      Clear search
+                    </Button>
+                  </div>
+                ) : null}
                 {showSourceStatus ? (
                   <div
                     role="status"
                     data-testid="launcher-source-status"
                     className={cn(
                       "mx-auto flex min-h-11 items-center gap-2 text-xs",
-                      WALLPAPER_TEXT.muted,
+                      "text-muted-strong",
                     )}
                   >
                     <span>More apps unavailable</span>

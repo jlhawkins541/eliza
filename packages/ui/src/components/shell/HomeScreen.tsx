@@ -26,11 +26,33 @@ import { LAYOUT_SHIFT_OBSERVER_INIT } from "../../testing/layout-stability";
 import { WidgetHost } from "../../widgets/WidgetHost";
 import { DefaultHomeWidgets } from "./DefaultHomeWidgets";
 import { NotificationsHomeCenter } from "./NotificationsHomeCenter";
+import { WorkspaceHeader } from "./WorkspaceHeader";
+import { Card } from "../ui/card";
 
 // A gentle staggered rise as the home settles in. Foregrounds stay fully opaque
 // throughout so slow paints and screenshot tooling never expose unreadable
 // intermediate content. Reduced-motion users see the settled layout directly.
 const HOME_SCREEN_CSS = `
+/* Professional workspace surfaces are opaque and follow the active theme. */
+[data-testid="home-screen"].eliza-workspace-home { background:var(--bg); color:var(--text); padding-inline:clamp(1rem,3vw,2.5rem); padding-top:clamp(1rem,2vw,1.75rem); }
+.eliza-workspace-home [data-testid="home-content-column"] { max-width:64rem; }
+.eliza-workspace-home [data-home-scroll-frame] { overflow-y:auto; overscroll-behavior-y:contain; }
+.eliza-workspace-home [data-testid="home-content-column"] { height:auto; min-height:100%; }
+.eliza-workspace-context { border:1px solid var(--border); background:var(--bg-elevated,var(--card)); border-radius:1rem; padding:1.25rem 1.5rem; }
+.eliza-workspace-home .eliza-workspace-context [data-home-editorial-header] { align-items:center; }
+.eliza-workspace-home .eliza-workspace-context [data-home-clock-time] { font-size:clamp(2rem,7cqw,3rem); letter-spacing:-.04em; line-height:1; }
+.eliza-workspace-home .eliza-workspace-context [data-home-clock-suffix], .eliza-workspace-home .eliza-workspace-context [data-home-weather-unit] { font-size:.875rem; }
+.eliza-workspace-home .eliza-workspace-context [data-home-clock-date] { font-size:.875rem; margin-top:.625rem; }
+.eliza-workspace-home .eliza-workspace-context [data-home-weather-temperature] { font-size:clamp(1.75rem,6cqw,2.5rem); }
+.eliza-workspace-home .eliza-workspace-context [data-home-weather-icon] { width:1.75rem; height:1.75rem; }
+.eliza-workspace-home .eliza-workspace-context [class*="text-white"] { color:var(--text-strong); text-shadow:none; }
+.eliza-workspace-home .eliza-workspace-context [data-home-clock-date], .eliza-workspace-home .eliza-workspace-context [data-home-weather-condition], .eliza-workspace-home .eliza-workspace-context [data-home-clock-suffix], .eliza-workspace-home .eliza-workspace-context [data-home-weather-unit] { color:var(--muted-strong); }
+.eliza-workspace-home [data-home-notification-region] { margin-top:1.25rem; margin-bottom:.5rem; }
+.eliza-workspace-home [data-testid="home-notification-center"] { background:var(--card); border-color:var(--border); border-radius:.875rem; color:var(--text); text-shadow:none; }
+.eliza-workspace-home [data-testid="home-notification-center"] [class*="text-white"] { color:var(--text); text-shadow:none; }
+.eliza-workspace-home [data-home-widget-region] { padding-top:1.25rem; }
+@media(max-width:560px) { .eliza-workspace-context { padding:1rem; } }
+
 @keyframes home-enter {
   from { transform: translateY(10px); }
   to   { transform: none; }
@@ -242,7 +264,10 @@ export interface HomeScreenProps {
  * content inert until the shade collapses. The separate launcher page is owned
  * by HomeLauncherSurface, not this dashboard.
  */
-export function HomeScreen({ apps }: HomeScreenProps): React.JSX.Element {
+export function HomeScreen({
+  apps,
+  onOpenTile,
+}: HomeScreenProps): React.JSX.Element {
   // The live activity stream feeds the home ranker's attention signals.
   const { events, clearEvents } = useActivityEvents();
   // The entrance rise plays once, on first mount only - never re-triggered by a
@@ -389,7 +414,7 @@ export function HomeScreen({ apps }: HomeScreenProps): React.JSX.Element {
       className={cn(
         // Keep the composer clearance outside the scrolling content. Short
         // windows scroll the whole dashboard; taller ones scroll its lower region.
-        "eliza-continuous-chat-scroll absolute inset-0 z-[1] touch-pan-y overflow-hidden",
+        "eliza-workspace-home eliza-continuous-chat-scroll absolute inset-0 z-[1] touch-pan-y overflow-hidden",
         // The Home host owns the status-bar inset; retain only the dashboard's
         // content gutter here so the inset is not applied twice.
         "px-4",
@@ -417,7 +442,10 @@ export function HomeScreen({ apps }: HomeScreenProps): React.JSX.Element {
             2×2 neighbours - no card, white text on the ambient field. Anchored
             at the top of the column as the editorial header. */}
           <div className={enterClass} style={{ animationDelay: "70ms" }}>
-            <DefaultHomeWidgets />
+            <WorkspaceHeader onOpenTile={onOpenTile} />
+            <Card variant="panel" className="eliza-workspace-context">
+              <DefaultHomeWidgets />
+            </Card>
           </div>
 
           {/* Rested notifications are content-sized and flex-shrink into the

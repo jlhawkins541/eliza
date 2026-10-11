@@ -420,3 +420,27 @@ describe("Launcher tile imagery (glyph-only)", () => {
     expect(visual?.querySelector("svg")).toBeNull();
   });
 });
+
+describe("workspace search", () => {
+  it("filters caller-owned entries and launches the selected result once", () => {
+    const onLaunch = vi.fn();
+    const documents = entry("documents", "Documents");
+    render(<Launcher entries={[entry("settings", "Settings"), documents]} onLaunch={onLaunch} />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Search applications" }), { target: { value: "  DOC  " } });
+    expect(tileIds()).toEqual(["documents"]);
+    fireEvent.click(screen.getByRole("button", { name: "Documents" }));
+    expect(onLaunch).toHaveBeenCalledExactlyOnceWith(documents);
+  });
+  it("recovers an empty search and Escape restores the current catalog", () => {
+    render(<Launcher entries={FEW} onLaunch={() => {}} />);
+    const search = screen.getByRole("textbox", { name: "Search applications" });
+    fireEvent.change(search, { target: { value: "unmatched-query" } });
+    expect(tileIds()).toEqual([]);
+    expect(screen.getByText("No applications match your search.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Clear search", exact: true }));
+    expect(tileIds()).toEqual(["chat", "settings"]);
+    fireEvent.change(search, { target: { value: "settings" } });
+    fireEvent.keyDown(search, { key: "Escape" });
+    expect(tileIds()).toEqual(["chat", "settings"]);
+  });
+});
