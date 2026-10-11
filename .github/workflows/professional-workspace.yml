@@ -34,7 +34,7 @@ jobs:
           skip-avatar-clone: "true"
           no-vision-deps: "true"
       - name: Generate shared i18n data
-        run: node packages/app-core/scripts/ensure-shared-i18n-data.mjs
+        run: bun run --cwd packages/shared build:i18n
       - name: Focused character coverage
         run: bun run --cwd packages/shared test src/character-presets.crypto-queen.test.ts
       - name: Focused workspace and launcher coverage

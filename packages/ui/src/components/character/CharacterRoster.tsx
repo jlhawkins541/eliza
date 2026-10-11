@@ -6,7 +6,7 @@
  */
 import type { StylePreset } from "@elizaos/shared";
 import { useEffect, useState } from "react";
-import { useAppSelector } from "../../state/app-store";
+import { useAppSelector } from "../../state";
 import { getVrmPreviewUrl } from "../../state/vrm";
 import { Button } from "../ui/button";
 import { INSET_CLIP, SLANT_CLIP } from "./CharacterRoster.helpers";

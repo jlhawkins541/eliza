@@ -425,8 +425,16 @@ describe("workspace search", () => {
   it("filters caller-owned entries and launches the selected result once", () => {
     const onLaunch = vi.fn();
     const documents = entry("documents", "Documents");
-    render(<Launcher entries={[entry("settings", "Settings"), documents]} onLaunch={onLaunch} />);
-    fireEvent.change(screen.getByRole("textbox", { name: "Search applications" }), { target: { value: "  DOC  " } });
+    render(
+      <Launcher
+        entries={[entry("settings", "Settings"), documents]}
+        onLaunch={onLaunch}
+      />,
+    );
+    fireEvent.change(
+      screen.getByRole("textbox", { name: "Search applications" }),
+      { target: { value: "  DOC  " } },
+    );
     expect(tileIds()).toEqual(["documents"]);
     fireEvent.click(screen.getByRole("button", { name: "Documents" }));
     expect(onLaunch).toHaveBeenCalledExactlyOnceWith(documents);
@@ -437,7 +445,9 @@ describe("workspace search", () => {
     fireEvent.change(search, { target: { value: "unmatched-query" } });
     expect(tileIds()).toEqual([]);
     expect(screen.getByText("No applications match your search.")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Clear search", exact: true }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Clear search", exact: true }),
+    );
     expect(tileIds()).toEqual(["chat", "settings"]);
     fireEvent.change(search, { target: { value: "settings" } });
     fireEvent.keyDown(search, { key: "Escape" });
